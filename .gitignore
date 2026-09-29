@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.log
+
+# Derived facts: regenerable from source, never reviewed (design D8)
+.enchanted/cache/
+
+# Vendored tree-sitter grammar (fetched at install)
+vendor/*.wasm
+
+# headless nvim test runs
+.nvimlog

@@ -1,0 +1,29 @@
+{
+  "name": "enchanted-map",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Persistent, entry-point-rooted code flow maps for Neovim and the browser",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "bin": {
+    "enchanted-map": "./src/cli.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types \"test/**/*.test.ts\"",
+    "test:unit": "node --test --experimental-strip-types \"test/unit/**/*.test.ts\"",
+    "cli": "node --experimental-strip-types src/cli.ts"
+  },
+  "dependencies": {
+    "basedpyright": "^1.31.0",
+    "tree-sitter-python": "^0.25.0",
+    "web-tree-sitter": "^0.25.0",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.0"
+  }
+}

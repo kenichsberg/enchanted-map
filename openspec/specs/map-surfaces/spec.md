@@ -1,0 +1,89 @@
+# Map Surfaces
+
+### Requirement: Neovim owns the sidecar lifetime
+
+The Neovim plugin SHALL spawn the analyzer sidecar and terminate it when the editor session
+ends. Communication between plugin and sidecar MUST use a process channel established at
+spawn, requiring no port configuration by the user.
+
+#### Scenario: Sidecar starts on demand
+- **WHEN** the user first requests a flow in a session
+- **THEN** the plugin spawns the sidecar and the request completes
+
+#### Scenario: Sidecar exits with the editor
+- **WHEN** the Neovim session ends
+- **THEN** the sidecar process terminates and leaves no orphan
+
+#### Scenario: Sidecar crash is reported
+- **WHEN** the sidecar exits unexpectedly
+- **THEN** the plugin reports the failure and permits a retry without restarting Neovim
+
+### Requirement: Flow operations from the editor
+
+The plugin SHALL let the user declare an entry point, open a flow, and accept a flow. When a
+flow is opened, the plugin MUST present it using view output rather than computing its own
+representation.
+
+#### Scenario: Declare an entry point at the cursor
+- **WHEN** the user invokes the declare command with the cursor on a function
+- **THEN** that symbol is added to project configuration as a named entry point
+
+#### Scenario: Open a flow in the editor
+- **WHEN** the user opens a flow
+- **THEN** its nodes and edges are listed with conditions shown on edges
+
+#### Scenario: Accept a flow
+- **WHEN** the user accepts the open flow
+- **THEN** the flow's acceptance stamp is written to its stored file
+
+### Requirement: Jump to source
+
+Selecting a node SHALL move the cursor to that node's source location. This MUST work from
+the editor surface and from the browser surface.
+
+#### Scenario: Jump from the editor
+- **WHEN** the user selects a node in the editor flow view
+- **THEN** the editor opens that file and places the cursor at the node's line
+
+#### Scenario: Jump from the browser
+- **WHEN** the user clicks a node in the browser canvas
+- **THEN** the connected Neovim instance opens that file and places the cursor at the line
+
+#### Scenario: Location no longer exists
+- **WHEN** a node's recorded location is no longer valid
+- **THEN** the jump is refused with an explanation, and the editor state is unchanged
+
+### Requirement: Browser canvas
+
+The sidecar SHALL serve a browser canvas that renders a flow spatially, with nodes as
+functions and conditions on edges. The canvas MUST reflect the same view object the editor
+consumes.
+
+#### Scenario: Canvas renders the open flow
+- **WHEN** the user opens the canvas for a flow
+- **THEN** the flow renders with its nodes, edges, and edge conditions
+
+#### Scenario: Canvas reflects provenance and staleness
+- **WHEN** a flow contains edges of differing provenance and some stale entries
+- **THEN** the canvas distinguishes the provenance tiers and marks the stale nodes and edges
+
+#### Scenario: Canvas updates on re-analysis
+- **WHEN** the flow is re-analyzed while the canvas is open
+- **THEN** the canvas updates without a manual page reload
+
+### Requirement: CI staleness check
+
+The system SHALL provide a command that reports flow staleness without an editor and without
+performing curation. The command MUST signal its result through its exit status.
+
+#### Scenario: Check reports stale flows
+- **WHEN** the check runs against a revision where stored flows have drifted
+- **THEN** it lists each affected flow with its stale entries and exits with a non-zero status
+
+#### Scenario: Check passes on a current map
+- **WHEN** every stored flow is current
+- **THEN** the check exits zero and reports no staleness
+
+#### Scenario: Check never writes curation
+- **WHEN** the check runs
+- **THEN** no stored flow file is modified

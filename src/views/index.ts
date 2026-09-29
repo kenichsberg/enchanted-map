@@ -1,0 +1,267 @@
+import type { Condition } from "../analysis/types.ts";
+import type { Flow, FlowEdge, FlowNode } from "../flow/model.ts";
+import type { StalenessReport } from "../flow/staleness.ts";
+import { acceptanceState, type AcceptanceState } from "../flow/staleness.ts";
+
+/**
+ * Views are plain serialisable objects. Nothing here imports an editor, a
+ * browser, or a rendering library: the editor, the canvas, and CI all consume
+ * the same output (design D13).
+ */
+
+export function conditionLabel(conditions: Condition[]): string {
+  if (conditions.length === 0) return "";
+  return conditions
+    .map((c) => {
+      const body = c.text ?? c.kind.replace(/_/g, " ");
+      return c.negated ? `!${body}` : body;
+    })
+    .join(" && ");
+}
+
+export interface ViewNode {
+  id: string;
+  label: string;
+  qualifiedName: string;
+  file: string;
+  line: number;
+  external: boolean;
+  /** Not expanded because the depth bound was reached. */
+  truncated: boolean;
+  /** Reached again while already on the traversal path. */
+  cycle: boolean;
+  stale: boolean;
+  staleReasons: string[];
+}
+
+export interface ViewEdge {
+  id: string;
+  from: string;
+  to: string;
+  /** Rendered guard, e.g. `for user in users && !urgent`. Empty when unguarded. */
+  conditionLabel: string;
+  conditions: Condition[];
+  provenance: string;
+  /** True when the concrete target is unknown. */
+  unresolved: boolean;
+  candidates: string[];
+  declaredTarget: string | null;
+  closesCycle: boolean;
+  stale: boolean;
+  staleReasons: string[];
+  file: string;
+  line: number;
+}
+
+export interface FlowView {
+  kind: "flow";
+  flow: string;
+  root: string;
+  maxDepth: number;
+  acceptance: AcceptanceState;
+  acceptedRevision: string | null;
+  broken: boolean;
+  nodes: ViewNode[];
+  edges: ViewEdge[];
+  holes: Array<{ id: string; siteId: string; declaredTarget: string; reason: string; candidates: string[] }>;
+  counts: { nodes: number; edges: number; holes: number; stale: number };
+}
+
+function staleIndex(report: StalenessReport | null): Map<string, string[]> {
+  const idx = new Map<string, string[]>();
+  for (const e of report?.entries ?? []) {
+    const list = idx.get(e.affects);
+    if (list) list.push(e.reason);
+    else idx.set(e.affects, [e.reason]);
+  }
+  return idx;
+}
+
+function toViewNode(n: FlowNode, flow: Flow, stale: Map<string, string[]>): ViewNode {
+  const reasons = stale.get(n.id) ?? [];
+  return {
+    id: n.id,
+    label: n.name,
+    qualifiedName: n.qualifiedName ?? n.name,
+    file: n.file,
+    line: n.line,
+    external: n.external,
+    truncated: flow.truncated.includes(n.id),
+    cycle: flow.cycles.includes(n.id),
+    stale: reasons.length > 0,
+    staleReasons: reasons,
+  };
+}
+
+function toViewEdge(e: FlowEdge, stale: Map<string, string[]>): ViewEdge {
+  const reasons = stale.get(e.id) ?? [];
+  return {
+    id: e.id,
+    from: e.from,
+    to: e.to,
+    conditionLabel: conditionLabel(e.conditions),
+    conditions: e.conditions,
+    provenance: e.provenance,
+    unresolved: e.provenance === "declared-unresolved",
+    candidates: e.candidates,
+    declaredTarget: e.declaredTarget,
+    closesCycle: e.closesCycle,
+    stale: reasons.length > 0,
+    staleReasons: reasons,
+    file: e.file,
+    line: e.line,
+  };
+}
+
+/** The whole flow: nodes are functions, guards live on edges (design D4). */
+export function flowView(flow: Flow, report: StalenessReport | null = null): FlowView {
+  const stale = staleIndex(report);
+  return {
+    kind: "flow",
+    flow: flow.name,
+    root: flow.root,
+    maxDepth: flow.maxDepth,
+    acceptance: acceptanceState(flow, report),
+    acceptedRevision: flow.accepted?.revision ?? null,
+    broken: flow.broken,
+    nodes: flow.nodes.map((n) => toViewNode(n, flow, stale)),
+    edges: flow.edges.map((e) => toViewEdge(e, stale)),
+    holes: flow.holes.map((h) => ({
+      id: h.id,
+      siteId: h.siteId,
+      declaredTarget: h.declaredTarget,
+      reason: h.reason,
+      candidates: h.candidates,
+    })),
+    counts: {
+      nodes: flow.nodes.length,
+      edges: flow.edges.length,
+      holes: flow.holes.length,
+      stale: report?.entries.length ?? 0,
+    },
+  };
+}
+
+export interface DiffView {
+  kind: "diff";
+  flow: string;
+  against: string;
+  addedNodes: ViewNode[];
+  removedNodes: ViewNode[];
+  addedEdges: ViewEdge[];
+  removedEdges: ViewEdge[];
+  /** Same edge, different guard. Reported as its own category, not remove+add. */
+  conditionChanged: Array<{ edge: ViewEdge; before: string; after: string }>;
+  /** Nodes the entry point reaches now but did not before. */
+  newlyReachable: ViewNode[];
+  empty: boolean;
+}
+
+export function diffView(before: Flow, after: Flow, against = "stored"): DiffView {
+  const empty = new Map<string, string[]>();
+  const beforeNodes = new Map(before.nodes.map((n) => [n.id, n]));
+  const afterNodes = new Map(after.nodes.map((n) => [n.id, n]));
+  const beforeEdges = new Map(before.edges.map((e) => [e.id, e]));
+  const afterEdges = new Map(after.edges.map((e) => [e.id, e]));
+
+  const addedNodes = after.nodes
+    .filter((n) => !beforeNodes.has(n.id))
+    .map((n) => toViewNode(n, after, empty));
+  const removedNodes = before.nodes
+    .filter((n) => !afterNodes.has(n.id))
+    .map((n) => toViewNode(n, before, empty));
+
+  const addedEdges: ViewEdge[] = [];
+  const conditionChanged: DiffView["conditionChanged"] = [];
+  for (const e of after.edges) {
+    const prev = beforeEdges.get(e.id);
+    if (!prev) {
+      addedEdges.push(toViewEdge(e, empty));
+      continue;
+    }
+    const beforeLabel = conditionLabel(prev.conditions);
+    const afterLabel = conditionLabel(e.conditions);
+    if (beforeLabel !== afterLabel) {
+      conditionChanged.push({ edge: toViewEdge(e, empty), before: beforeLabel, after: afterLabel });
+    }
+  }
+  const removedEdges = before.edges
+    .filter((e) => !afterEdges.has(e.id))
+    .map((e) => toViewEdge(e, empty));
+
+  return {
+    kind: "diff",
+    flow: after.name,
+    against,
+    addedNodes,
+    removedNodes,
+    addedEdges,
+    removedEdges,
+    conditionChanged,
+    newlyReachable: addedNodes,
+    empty:
+      addedNodes.length === 0 &&
+      removedNodes.length === 0 &&
+      addedEdges.length === 0 &&
+      removedEdges.length === 0 &&
+      conditionChanged.length === 0,
+  };
+}
+
+export interface StalenessView {
+  kind: "staleness";
+  flow: string;
+  stale: boolean;
+  entries: Array<{ kind: string; id: string; affects: string; reason: string; label: string }>;
+  staleNodeIds: string[];
+  staleEdgeIds: string[];
+  invalidated: string[];
+}
+
+export function stalenessView(flow: Flow, report: StalenessReport): StalenessView {
+  const label = (id: string) =>
+    flow.nodes.find((n) => n.id === id)?.name ??
+    flow.edges.find((e) => e.id === id)?.id ??
+    id;
+  return {
+    kind: "staleness",
+    flow: flow.name,
+    stale: report.entries.length > 0,
+    entries: report.entries.map((e) => ({
+      kind: e.kind,
+      id: e.id,
+      affects: e.affects,
+      reason: e.reason,
+      label: label(e.affects),
+    })),
+    staleNodeIds: report.entries.filter((e) => e.kind === "node").map((e) => e.affects),
+    staleEdgeIds: report.entries.filter((e) => e.kind === "edge").map((e) => e.affects),
+    invalidated: report.invalidated,
+  };
+}
+
+export interface ProvenanceView {
+  kind: "provenance";
+  flow: string;
+  tiers: Record<string, string[]>;
+  unresolved: Array<{ edgeId: string; declaredTarget: string; candidates: string[] }>;
+}
+
+export function provenanceView(flow: Flow): ProvenanceView {
+  const tiers: Record<string, string[]> = {
+    "lsp-verified": [],
+    heuristic: [],
+    "declared-unresolved": [],
+  };
+  for (const e of flow.edges) {
+    (tiers[e.provenance] ??= []).push(e.id);
+  }
+  return {
+    kind: "provenance",
+    flow: flow.name,
+    tiers,
+    unresolved: flow.edges
+      .filter((e) => e.provenance === "declared-unresolved")
+      .map((e) => ({ edgeId: e.id, declaredTarget: e.to, candidates: e.candidates })),
+  };
+}

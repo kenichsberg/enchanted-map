@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Enchanted Map</title>
+<style>
+  :root {
+    --bg: #fbfaf7; --fg: #1d1c19; --muted: #6d6a62; --line: #d9d5cb;
+    --panel: #ffffff; --accent: #3b5bdb; --stale: #c2410c; --hole: #a16207;
+    --verified: #1d1c19; --heuristic: #3b5bdb; --unresolved: #a16207;
+  }
+  :root:not([data-theme="light"]) { }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16151a; --fg: #eceaf0; --muted: #9a97a3; --line: #34323c;
+      --panel: #1f1e25; --accent: #8da2fb; --stale: #fb923c; --hole: #fbbf24;
+      --verified: #eceaf0; --heuristic: #8da2fb; --unresolved: #fbbf24;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16151a; --fg: #eceaf0; --muted: #9a97a3; --line: #34323c;
+    --panel: #1f1e25; --accent: #8da2fb; --stale: #fb923c; --hole: #fbbf24;
+    --verified: #eceaf0; --heuristic: #8da2fb; --unresolved: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+    padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 2;
+  }
+  h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+  select, button {
+    font: inherit; color: var(--fg); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .status { color: var(--muted); font-size: 13px; margin-left: auto; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; padding: 8px 16px;
+    border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 22px; height: 0; border-top-width: 2px; display: inline-block; }
+  main { padding: 16px; overflow: auto; }
+  svg { display: block; max-width: 100%; }
+  .node rect { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; rx: 7; }
+  .node.root rect { stroke: var(--accent); stroke-width: 2.5; }
+  .node.stale rect { stroke: var(--stale); stroke-dasharray: 5 3; }
+  .node.external rect { fill: transparent; stroke-dasharray: 2 3; }
+  .node text { fill: var(--fg); font-size: 13px; }
+  .node .sub { fill: var(--muted); font-size: 10.5px; }
+  .node { cursor: pointer; }
+  .node:hover rect { stroke: var(--accent); }
+  .edge { fill: none; stroke-width: 1.6; }
+  .edge.lsp-verified { stroke: var(--verified); }
+  .edge.heuristic { stroke: var(--heuristic); stroke-dasharray: 7 4; }
+  .edge.declared-unresolved { stroke: var(--unresolved); stroke-dasharray: 2 4; }
+  .edge.stale { stroke: var(--stale); }
+  .elabel { font-size: 11px; fill: var(--muted); }
+  .elabel .bg { fill: var(--bg); }
+  .empty { color: var(--muted); padding: 32px 0; }
+  ul.list { margin: 0; padding-left: 18px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  @media (max-width: 600px) { main { padding: 16px; } header { padding: 12px 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Enchanted Map</h1>
+  <select id="flow"></select>
+  <select id="lens">
+    <option value="flow">flow</option>
+    <option value="diff">diff</option>
+    <option value="stale">staleness</option>
+    <option value="provenance">provenance</option>
+  </select>
+  <button id="refresh">Re-analyze</button>
+  <span class="status" id="status">connecting…</span>
+</header>
+<div class="legend">
+  <span><i class="swatch" style="border-top:2px solid var(--verified)"></i> verified</span>
+  <span><i class="swatch" style="border-top:2px dashed var(--heuristic)"></i> heuristic</span>
+  <span><i class="swatch" style="border-top:2px dotted var(--unresolved)"></i> unresolved dispatch</span>
+  <span><i class="swatch" style="border-top:2px dashed var(--stale)"></i> stale</span>
+</div>
+<main id="out"><p class="empty">Loading…</p></main>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const out = $("out"), statusEl = $("status");
+let flows = [], current = null;
+
+async function api(method, params = {}) {
+  const res = await fetch("/api", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ method, params }),
+  });
+  const body = await res.json();
+  if (!res.ok || body.error) throw new Error(body.error || `HTTP ${res.status}`);
+  return body.result;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+/** Longest-path layering from the root, so calls flow downward. */
+function layout(view) {
+  const nodes = new Map(view.nodes.map((n) => [n.id, { ...n, depth: 0 }]));
+  const outgoing = new Map();
+  for (const e of view.edges) {
+    if (!outgoing.has(e.from)) outgoing.set(e.from, []);
+    outgoing.get(e.from).push(e);
+  }
+  const seen = new Set();
+  const walk = (id, depth) => {
+    const n = nodes.get(id);
+    if (!n) return;
+    if (depth > n.depth) n.depth = depth;
+    if (seen.has(id)) return;
+    seen.add(id);
+    for (const e of outgoing.get(id) ?? []) if (!e.closesCycle) walk(e.to, depth + 1);
+    seen.delete(id);
+  };
+  walk(view.root, 0);
+
+  const byDepth = new Map();
+  for (const n of nodes.values()) {
+    if (!byDepth.has(n.depth)) byDepth.set(n.depth, []);
+    byDepth.get(n.depth).push(n);
+  }
+  const W = 210, H = 46, GAPX = 34, GAPY = 78;
+  let maxPerRow = 0;
+  for (const row of byDepth.values()) maxPerRow = Math.max(maxPerRow, row.length);
+  const width = Math.max(maxPerRow * (W + GAPX) + GAPX, 560);
+  for (const [depth, row] of byDepth) {
+    row.sort((a, b) => a.label.localeCompare(b.label));
+    const rowW = row.length * W + (row.length - 1) * GAPX;
+    let x = (width - rowW) / 2;
+    for (const n of row) {
+      n.x = x; n.y = GAPY / 2 + depth * (H + GAPY); n.w = W; n.h = H;
+      x += W + GAPX;
+    }
+  }
+  const height = (byDepth.size) * (H + GAPY) + GAPY;
+  return { nodes, width, height };
+}
+
+function renderFlow(view) {
+  if (!view.nodes.length) return `<p class="empty">This flow has no nodes.</p>`;
+  const { nodes, width, height } = layout(view);
+  const parts = [];
+  parts.push(`<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="call flow">`);
+  parts.push(`<defs><marker id="a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>`);
+
+  for (const e of view.edges) {
+    const a = nodes.get(e.from), b = nodes.get(e.to);
+    if (!a || !b) continue;
+    const x1 = a.x + a.w / 2, y1 = a.y + a.h;
+    const x2 = b.x + b.w / 2, y2 = b.y;
+    const my = (y1 + y2) / 2;
+    const d = b.y <= a.y
+      ? `M${x1},${y1} C${x1 + 90},${y1 + 40} ${x2 + 90},${y2 - 40} ${x2},${y2}`
+      : `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;
+    const cls = `edge ${e.provenance}${e.stale ? " stale" : ""}`;
+    const colorVar = e.stale ? "--stale" : e.provenance === "heuristic" ? "--heuristic"
+      : e.provenance === "declared-unresolved" ? "--unresolved" : "--verified";
+    parts.push(`<path class="${cls}" d="${d}" marker-end="url(#a)" style="color:var(${colorVar})"><title>${esc(e.id)}</title></path>`);
+    if (e.conditionLabel) {
+      const lx = (x1 + x2) / 2, ly = my;
+      const w = Math.min(e.conditionLabel.length * 6.2 + 10, 230);
+      parts.push(`<g class="elabel"><rect class="bg" x="${lx - w / 2}" y="${ly - 9}" width="${w}" height="16" rx="4"/>`);
+      parts.push(`<text x="${lx}" y="${ly + 3}" text-anchor="middle">${esc(trunc(e.conditionLabel, 36))}<title>${esc(e.conditionLabel)}</title></text></g>`);
+    }
+  }
+
+  for (const n of nodes.values()) {
+    const cls = ["node", n.id === view.root ? "root" : "", n.stale ? "stale" : "", n.external ? "external" : ""].filter(Boolean).join(" ");
+    const sub = [n.external ? "external" : `${n.file}:${n.line + 1}`, n.truncated ? "truncated" : "", n.cycle ? "cycle" : ""].filter(Boolean).join(" · ");
+    parts.push(`<g class="${cls}" data-file="${esc(n.file)}" data-line="${n.line}" tabindex="0" role="button">`);
+    parts.push(`<rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}"/>`);
+    parts.push(`<text x="${n.x + 12}" y="${n.y + 20}">${esc(trunc(n.label, 24))}</text>`);
+    parts.push(`<text class="sub" x="${n.x + 12}" y="${n.y + 35}">${esc(trunc(sub, 32))}</text>`);
+    parts.push(`<title>${esc(n.qualifiedName)}\n${esc(n.file)}:${n.line + 1}${n.staleReasons.length ? "\nstale: " + esc(n.staleReasons.join(", ")) : ""}</title></g>`);
+  }
+  parts.push(`</svg>`);
+
+  if (view.holes.length) {
+    parts.push(`<h2 style="font-size:14px;margin:20px 0 6px">Unresolved dispatch (${view.holes.length})</h2><ul class="list">`);
+    for (const h of view.holes) {
+      parts.push(`<li><code>${esc(h.declaredTarget)}</code> — ${esc(h.reason)}, ${h.candidates.length} candidates<ul class="list">${h.candidates.map((c) => `<li><code>${esc(c)}</code></li>`).join("")}</ul></li>`);
+    }
+    parts.push(`</ul>`);
+  }
+  return parts.join("");
+}
+
+function trunc(s, n) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+
+function renderDiff(v) {
+  if (v.empty) return `<p class="empty">No structural change in <code>${esc(v.flow)}</code>.</p>`;
+  const sec = (title, items) => items.length ? `<h2 style="font-size:14px;margin:18px 0 4px">${title} (${items.length})</h2><ul class="list">${items.join("")}</ul>` : "";
+  return [
+    sec("Newly reachable", v.newlyReachable.map((n) => `<li><code>${esc(n.label)}</code> ${esc(n.file)}:${n.line + 1}</li>`)),
+    sec("Removed nodes", v.removedNodes.map((n) => `<li><code>${esc(n.label)}</code></li>`)),
+    sec("Added edges", v.addedEdges.map((e) => `<li><code>${esc(e.id)}</code>${e.conditionLabel ? ` [${esc(e.conditionLabel)}]` : ""}</li>`)),
+    sec("Removed edges", v.removedEdges.map((e) => `<li><code>${esc(e.id)}</code></li>`)),
+    sec("Guard changed", v.conditionChanged.map((c) => `<li><code>${esc(c.edge.id)}</code><br><small>${esc(c.before || "(none)")} → ${esc(c.after || "(none)")}</small></li>`)),
+  ].join("");
+}
+
+function renderStale(v) {
+  if (!v.stale) return `<p class="empty"><code>${esc(v.flow)}</code> is current.</p>`;
+  return `<h2 style="font-size:14px;margin:0 0 6px">${v.entries.length} stale entries</h2><ul class="list">${v.entries.map((e) => `<li>${esc(e.kind)} <strong>${esc(e.reason)}</strong> — <code>${esc(e.label)}</code></li>`).join("")}</ul>`;
+}
+
+function renderProvenance(v) {
+  const tiers = Object.entries(v.tiers).map(([t, ids]) => `<li><code>${esc(t)}</code>: ${ids.length}</li>`).join("");
+  const un = v.unresolved.map((u) => `<li><code>${esc(u.edgeId)}</code> → <code>${esc(u.declaredTarget)}</code> (${u.candidates.length} candidates)</li>`).join("");
+  return `<h2 style="font-size:14px;margin:0 0 6px">Provenance</h2><ul class="list">${tiers}</ul>` +
+    (un ? `<h2 style="font-size:14px;margin:18px 0 4px">Unresolved (${v.unresolved.length})</h2><ul class="list">${un}</ul>` : "");
+}
+
+async function load() {
+  const flow = $("flow").value, lens = $("lens").value;
+  if (!flow) { out.innerHTML = `<p class="empty">No flows declared yet.</p>`; return; }
+  statusEl.textContent = "analyzing…";
+  try {
+    const view = await api("view", { flow, lens });
+    current = view;
+    out.innerHTML =
+      view.kind === "flow" ? renderFlow(view)
+      : view.kind === "diff" ? renderDiff(view)
+      : view.kind === "staleness" ? renderStale(view)
+      : renderProvenance(view);
+    statusEl.textContent = view.kind === "flow"
+      ? `${view.counts.nodes} nodes · ${view.counts.edges} edges · ${view.counts.holes} holes · ${view.acceptance}`
+      : "ready";
+  } catch (e) {
+    out.innerHTML = `<p class="empty">${esc(e.message)}</p>`;
+    statusEl.textContent = "error";
+  }
+}
+
+out.addEventListener("click", (ev) => {
+  const g = ev.target.closest(".node");
+  if (!g) return;
+  api("jump", { file: g.dataset.file, line: Number(g.dataset.line), character: 0 })
+    .then(() => { statusEl.textContent = `jumped to ${g.dataset.file}:${Number(g.dataset.line) + 1}`; })
+    .catch((e) => { statusEl.textContent = e.message; });
+});
+out.addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter" && ev.target.closest(".node")) ev.target.closest(".node").dispatchEvent(new Event("click", { bubbles: true }));
+});
+
+$("flow").addEventListener("change", load);
+$("lens").addEventListener("change", load);
+$("refresh").addEventListener("click", async () => {
+  statusEl.textContent = "re-analyzing…";
+  try { await api("analyze", { flow: $("flow").value }); await load(); }
+  catch (e) { statusEl.textContent = e.message; }
+});
+
+const es = new EventSource("/events");
+es.addEventListener("flow", () => load());
+es.onopen = () => { if (statusEl.textContent === "connecting…") statusEl.textContent = "connected"; };
+
+(async () => {
+  try {
+    const { flows: names } = await api("flows");
+    flows = names;
+    $("flow").innerHTML = names.map((n) => `<option>${esc(n)}</option>`).join("");
+    await load();
+  } catch (e) {
+    out.innerHTML = `<p class="empty">${esc(e.message)}</p>`;
+  }
+})();
+</script>
+</body>
+</html>

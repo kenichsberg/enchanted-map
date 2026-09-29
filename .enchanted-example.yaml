@@ -1,0 +1,9 @@
+# Project configuration for enchanted-map.
+# Copy to .enchanted/config.yaml and edit.
+#
+# Entry points are declared, never inferred (design: Non-Goals).
+entryPoints:
+  - name: login
+    file: app.py
+    symbol: login
+maxDepth: 3
