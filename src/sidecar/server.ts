@@ -81,7 +81,12 @@ export class Sidecar {
       case "view": {
         const lens = String(params["lens"] ?? "flow");
         const status = await this.service.status(name);
-        const stored = status.stored ?? status.current;
+        // A stored flow that predates the current model would render without
+        // ordering or nesting and look simply wrong. Prefer the fresh analysis,
+        // which already carries the stored flow's curation forward.
+        const usableStored =
+          status.stored && !status.stored.legacy ? status.stored : null;
+        const stored = usableStored ?? status.current ?? status.stored;
         if (!stored) {
           // status() captures the real failure; reporting "not analyzed"
           // instead hides it and sends the user looking in the wrong place.
@@ -192,9 +197,24 @@ export class Sidecar {
       return;
     }
 
+    if (url.pathname === "/render.mjs") {
+      const js = readFileSync(path.resolve(import.meta.dirname, "render.mjs"), "utf8");
+      res.writeHead(200, {
+        "content-type": "text/javascript; charset=utf-8",
+        "cache-control": "no-store",
+      });
+      res.end(js);
+      return;
+    }
+
     if (url.pathname === "/" || url.pathname === "/index.html") {
       const html = readFileSync(path.resolve(import.meta.dirname, "canvas.html"), "utf8");
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      // The page is read from disk per request; tell the browser not to cache
+      // it either, so an edit is visible on reload while iterating.
+      res.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+      });
       res.end(html);
       return;
     }

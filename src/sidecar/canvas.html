@@ -60,6 +60,15 @@
   .edge.heuristic { stroke: var(--heuristic); stroke-dasharray: 7 4; }
   .edge.declared-unresolved { stroke: var(--unresolved); stroke-dasharray: 2 4; }
   .edge.stale { stroke: var(--stale); }
+  .edge.arg { stroke-width: 1.1; opacity: 0.85; }
+  .feeds { fill: none; stroke: var(--muted); stroke-width: 1.1; stroke-dasharray: 3 3; }
+  .seq { font-size: 10px; fill: var(--muted); }
+  .badge { font-size: 10px; fill: var(--muted); }
+  .node.argument rect { stroke-dasharray: 6 2; }
+  .dock text { fill: var(--muted); font-size: 11.5px; }
+  .dock:hover text { fill: var(--accent); }
+  .dock { cursor: pointer; }
+  .docksep { stroke: var(--line); stroke-width: 1; }
   .elabel { font-size: 11px; fill: var(--muted); }
   .elabel .bg { fill: var(--bg); }
   .empty { color: var(--muted); padding: 32px 0; }
@@ -86,10 +95,13 @@
   <span><i class="swatch" style="border-top:2px dashed var(--heuristic)"></i> heuristic</span>
   <span><i class="swatch" style="border-top:2px dotted var(--unresolved)"></i> unresolved dispatch</span>
   <span><i class="swatch" style="border-top:2px dashed var(--stale)"></i> stale</span>
+  <span><i class="swatch" style="border-top:1px dashed var(--muted)"></i> argument, evaluated first</span>
 </div>
 <main id="out"><p class="empty">Loading…</p></main>
 
 <script type="module">
+import { esc, renderFlow, renderDiff, renderStale, renderProvenance } from "./render.mjs";
+
 const $ = (id) => document.getElementById(id);
 const out = $("out"), statusEl = $("status");
 let flows = [], current = null;
@@ -103,127 +115,6 @@ async function api(method, params = {}) {
   const body = await res.json();
   if (!res.ok || body.error) throw new Error(body.error || `HTTP ${res.status}`);
   return body.result;
-}
-
-function esc(s) {
-  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-}
-
-/** Longest-path layering from the root, so calls flow downward. */
-function layout(view) {
-  const nodes = new Map(view.nodes.map((n) => [n.id, { ...n, depth: 0 }]));
-  const outgoing = new Map();
-  for (const e of view.edges) {
-    if (!outgoing.has(e.from)) outgoing.set(e.from, []);
-    outgoing.get(e.from).push(e);
-  }
-  const seen = new Set();
-  const walk = (id, depth) => {
-    const n = nodes.get(id);
-    if (!n) return;
-    if (depth > n.depth) n.depth = depth;
-    if (seen.has(id)) return;
-    seen.add(id);
-    for (const e of outgoing.get(id) ?? []) if (!e.closesCycle) walk(e.to, depth + 1);
-    seen.delete(id);
-  };
-  walk(view.root, 0);
-
-  const byDepth = new Map();
-  for (const n of nodes.values()) {
-    if (!byDepth.has(n.depth)) byDepth.set(n.depth, []);
-    byDepth.get(n.depth).push(n);
-  }
-  const W = 210, H = 46, GAPX = 34, GAPY = 78;
-  let maxPerRow = 0;
-  for (const row of byDepth.values()) maxPerRow = Math.max(maxPerRow, row.length);
-  const width = Math.max(maxPerRow * (W + GAPX) + GAPX, 560);
-  for (const [depth, row] of byDepth) {
-    row.sort((a, b) => a.label.localeCompare(b.label));
-    const rowW = row.length * W + (row.length - 1) * GAPX;
-    let x = (width - rowW) / 2;
-    for (const n of row) {
-      n.x = x; n.y = GAPY / 2 + depth * (H + GAPY); n.w = W; n.h = H;
-      x += W + GAPX;
-    }
-  }
-  const height = (byDepth.size) * (H + GAPY) + GAPY;
-  return { nodes, width, height };
-}
-
-function renderFlow(view) {
-  if (!view.nodes.length) return `<p class="empty">This flow has no nodes.</p>`;
-  const { nodes, width, height } = layout(view);
-  const parts = [];
-  parts.push(`<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="call flow">`);
-  parts.push(`<defs><marker id="a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>`);
-
-  for (const e of view.edges) {
-    const a = nodes.get(e.from), b = nodes.get(e.to);
-    if (!a || !b) continue;
-    const x1 = a.x + a.w / 2, y1 = a.y + a.h;
-    const x2 = b.x + b.w / 2, y2 = b.y;
-    const my = (y1 + y2) / 2;
-    const d = b.y <= a.y
-      ? `M${x1},${y1} C${x1 + 90},${y1 + 40} ${x2 + 90},${y2 - 40} ${x2},${y2}`
-      : `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;
-    const cls = `edge ${e.provenance}${e.stale ? " stale" : ""}`;
-    const colorVar = e.stale ? "--stale" : e.provenance === "heuristic" ? "--heuristic"
-      : e.provenance === "declared-unresolved" ? "--unresolved" : "--verified";
-    parts.push(`<path class="${cls}" d="${d}" marker-end="url(#a)" style="color:var(${colorVar})"><title>${esc(e.id)}</title></path>`);
-    if (e.conditionLabel) {
-      const lx = (x1 + x2) / 2, ly = my;
-      const w = Math.min(e.conditionLabel.length * 6.2 + 10, 230);
-      parts.push(`<g class="elabel"><rect class="bg" x="${lx - w / 2}" y="${ly - 9}" width="${w}" height="16" rx="4"/>`);
-      parts.push(`<text x="${lx}" y="${ly + 3}" text-anchor="middle">${esc(trunc(e.conditionLabel, 36))}<title>${esc(e.conditionLabel)}</title></text></g>`);
-    }
-  }
-
-  for (const n of nodes.values()) {
-    const cls = ["node", n.id === view.root ? "root" : "", n.stale ? "stale" : "", n.external ? "external" : ""].filter(Boolean).join(" ");
-    const sub = [n.external ? "external" : `${n.file}:${n.line + 1}`, n.truncated ? "truncated" : "", n.cycle ? "cycle" : ""].filter(Boolean).join(" · ");
-    parts.push(`<g class="${cls}" data-file="${esc(n.file)}" data-line="${n.line}" tabindex="0" role="button">`);
-    parts.push(`<rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}"/>`);
-    parts.push(`<text x="${n.x + 12}" y="${n.y + 20}">${esc(trunc(n.label, 24))}</text>`);
-    parts.push(`<text class="sub" x="${n.x + 12}" y="${n.y + 35}">${esc(trunc(sub, 32))}</text>`);
-    parts.push(`<title>${esc(n.qualifiedName)}\n${esc(n.file)}:${n.line + 1}${n.staleReasons.length ? "\nstale: " + esc(n.staleReasons.join(", ")) : ""}</title></g>`);
-  }
-  parts.push(`</svg>`);
-
-  if (view.holes.length) {
-    parts.push(`<h2 style="font-size:14px;margin:20px 0 6px">Unresolved dispatch (${view.holes.length})</h2><ul class="list">`);
-    for (const h of view.holes) {
-      parts.push(`<li><code>${esc(h.declaredTarget)}</code> — ${esc(h.reason)}, ${h.candidates.length} candidates<ul class="list">${h.candidates.map((c) => `<li><code>${esc(c)}</code></li>`).join("")}</ul></li>`);
-    }
-    parts.push(`</ul>`);
-  }
-  return parts.join("");
-}
-
-function trunc(s, n) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
-
-function renderDiff(v) {
-  if (v.empty) return `<p class="empty">No structural change in <code>${esc(v.flow)}</code>.</p>`;
-  const sec = (title, items) => items.length ? `<h2 style="font-size:14px;margin:18px 0 4px">${title} (${items.length})</h2><ul class="list">${items.join("")}</ul>` : "";
-  return [
-    sec("Newly reachable", v.newlyReachable.map((n) => `<li><code>${esc(n.label)}</code> ${esc(n.file)}:${n.line + 1}</li>`)),
-    sec("Removed nodes", v.removedNodes.map((n) => `<li><code>${esc(n.label)}</code></li>`)),
-    sec("Added edges", v.addedEdges.map((e) => `<li><code>${esc(e.id)}</code>${e.conditionLabel ? ` [${esc(e.conditionLabel)}]` : ""}</li>`)),
-    sec("Removed edges", v.removedEdges.map((e) => `<li><code>${esc(e.id)}</code></li>`)),
-    sec("Guard changed", v.conditionChanged.map((c) => `<li><code>${esc(c.edge.id)}</code><br><small>${esc(c.before || "(none)")} → ${esc(c.after || "(none)")}</small></li>`)),
-  ].join("");
-}
-
-function renderStale(v) {
-  if (!v.stale) return `<p class="empty"><code>${esc(v.flow)}</code> is current.</p>`;
-  return `<h2 style="font-size:14px;margin:0 0 6px">${v.entries.length} stale entries</h2><ul class="list">${v.entries.map((e) => `<li>${esc(e.kind)} <strong>${esc(e.reason)}</strong> — <code>${esc(e.label)}</code></li>`).join("")}</ul>`;
-}
-
-function renderProvenance(v) {
-  const tiers = Object.entries(v.tiers).map(([t, ids]) => `<li><code>${esc(t)}</code>: ${ids.length}</li>`).join("");
-  const un = v.unresolved.map((u) => `<li><code>${esc(u.edgeId)}</code> → <code>${esc(u.declaredTarget)}</code> (${u.candidates.length} candidates)</li>`).join("");
-  return `<h2 style="font-size:14px;margin:0 0 6px">Provenance</h2><ul class="list">${tiers}</ul>` +
-    (un ? `<h2 style="font-size:14px;margin:18px 0 4px">Unresolved (${v.unresolved.length})</h2><ul class="list">${un}</ul>` : "");
 }
 
 async function load() {
