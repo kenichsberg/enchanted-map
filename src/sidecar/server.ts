@@ -104,7 +104,8 @@ export class Sidecar {
           return stalenessView(stored, status.report);
         }
         if (lens === "provenance") return provenanceView(stored);
-        return flowView(stored, status.report);
+        const focus = typeof params["focus"] === "string" ? params["focus"] : null;
+        return flowView(stored, status.report, { focus });
       }
 
       case "accept": {

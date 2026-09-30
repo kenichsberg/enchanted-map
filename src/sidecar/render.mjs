@@ -110,7 +110,15 @@ export function renderFlow(view) {
   const COLLAPSE_DEPTH = 2;   // deeper argument nesting is summarised, not drawn
   const collapsed = new Map(); // consuming node id -> count hidden
   const parts = [];
-  parts.push(`<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="call flow">`);
+  // The viewBox stays the whole graph; zoom sizes the ELEMENT and the
+  // container scrolls natively. Text still re-rasterises rather than scaling
+  // as a picture (design D5's reason), and the viewer gets real scrollbars and
+  // a sense of where they are, which viewBox panning could not give.
+  parts.push(
+    `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet" ` +
+    `data-graph-width="${width}" data-graph-height="${height}" ` +
+    `role="img" aria-label="call flow">`
+  );
   parts.push(`<defs><marker id="a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>`);
 
   for (const e of view.edges) {
@@ -162,7 +170,10 @@ export function renderFlow(view) {
     const cls = ["node", n.id === view.root ? "root" : "", n.stale ? "stale" : "",
       n.external ? "external" : "", n.isArgument ? "argument" : ""].filter(Boolean).join(" ");
     const sub = [n.external ? "external" : `${n.file}:${n.line + 1}`, n.truncated ? "truncated" : "", n.cycle ? "cycle" : ""].filter(Boolean).join(" · ");
-    parts.push(`<g class="${cls}" data-file="${esc(n.file)}" data-line="${n.line}" tabindex="0" role="button">`);
+    parts.push(
+      `<g class="${cls}" data-id="${esc(n.id)}" data-file="${esc(n.file)}" ` +
+      `data-line="${n.line}" tabindex="0" role="button">`
+    );
     parts.push(`<rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}"/>`);
     parts.push(`<text x="${n.x + 12}" y="${n.y + 20}">${esc(trunc(n.label, 24))}</text>`);
     parts.push(`<text class="sub" x="${n.x + 12}" y="${n.y + 35}">${esc(trunc(sub, 32))}</text>`);
@@ -183,6 +194,25 @@ export function renderFlow(view) {
         `\nargument of ${esc(n.label)}, evaluated first</title></g>`
       );
     });
+
+    // A visible focus control. Focus was a double-click and nothing else,
+    // which is a gesture rather than a control: a reader who clicks once gets
+    // a jump and concludes focus does not work.
+    // Not on the root (nothing to focus to) and not on an external node,
+    // which is never expanded, so focusing it would show only itself.
+    if (n.id !== view.root && !n.external) {
+      const cx = n.x + n.w - 15, cy = n.y + 15;
+      parts.push(
+        `<g class="focusbtn" data-focus-id="${esc(n.id)}" tabindex="0" role="button" ` +
+        `aria-label="Focus ${esc(n.label)}">` +
+        `<circle cx="${cx}" cy="${cy}" r="9"/>` +
+        // A thumbtack, not a map pin: this pins a node, it does not mark a
+        // place. Cap, flared collar, then the needle.
+        `<path class="pin" d="M${cx - 4},${cy - 5.5} h8 v2 h-2.2 l1,4 h-5.6 l1,-4 h-2.2 z"/>` +
+        `<path class="pinneedle" d="M${cx},${cy + 0.5} L${cx},${cy + 5}"/>` +
+        `<title>Pin ${esc(n.label)}: show only what it reaches</title></g>`
+      );
+    }
 
     const hidden = collapsed.get(n.id);
     if (hidden) {

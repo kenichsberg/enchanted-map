@@ -80,10 +80,33 @@ export interface ViewEdge {
   evaluatedBeforeEnclosing: boolean;
 }
 
+/** A step on the path from a flow's entry point to a focused node. */
+export interface PathStep {
+  id: string;
+  label: string;
+}
+
+export interface FlowViewOptions {
+  /** Render only this node and what it reaches (design D1). */
+  focus?: string | null;
+}
+
 export interface FlowView {
   kind: "flow";
   flow: string;
+  /** The focused node when focused, otherwise the flow's entry point. */
   root: string;
+  /** The flow's own entry point, unchanged by focus. */
+  entryPoint: string;
+  /** The focused node, or null. */
+  focus: string | null;
+  /**
+   * Ordered path from the entry point to the focused node, so a surface can
+   * offer a way back. Empty when unfocused. It comes from the graph rather
+   * than from a viewer's click history, so it survives a reload and is the
+   * same on every surface (design D2).
+   */
+  path: PathStep[];
   maxDepth: number;
   acceptance: AcceptanceState;
   acceptedRevision: string | null;
@@ -193,20 +216,118 @@ function sequence(edges: FlowEdge[]): Array<{ edge: FlowEdge; depth: number }> {
   return out;
 }
 
+/**
+ * Nodes reachable from `start`, following call edges.
+ *
+ * A node reachable both from here and from elsewhere is included: the question
+ * focus answers is "what does this do", and a helper called from two places is
+ * part of what it does (design D3).
+ */
+function reachableFrom(start: string, edges: FlowEdge[]): Set<string> {
+  const outgoing = new Map<string, FlowEdge[]>();
+  for (const e of edges) {
+    const list = outgoing.get(e.from);
+    if (list) list.push(e);
+    else outgoing.set(e.from, [e]);
+  }
+  const seen = new Set<string>([start]);
+  const queue = [start];
+  while (queue.length > 0) {
+    const id = queue.shift() as string;
+    for (const e of outgoing.get(id) ?? []) {
+      // A cycle-closing edge is recorded but not followed, exactly as the
+      // traversal that produced it did.
+      if (e.closesCycle) continue;
+      if (seen.has(e.to)) continue;
+      seen.add(e.to);
+      queue.push(e.to);
+    }
+  }
+
+  // A retained edge may name symbols no call reaches: the candidates of an
+  // unresolved dispatch, and the declared target a heuristic edge was
+  // rewritten from. They are part of what that edge says, so a focused view
+  // that dropped them could not render its own holes or provenance. Added
+  // without expanding them -- nothing calls them.
+  for (const e of edges) {
+    if (!seen.has(e.from)) continue;
+    if (e.declaredTarget) seen.add(e.declaredTarget);
+    for (const c of e.candidates) seen.add(c);
+  }
+  return seen;
+}
+
+/** Shortest path from the entry point to `target`, or empty if unreachable. */
+function pathTo(root: string, target: string, edges: FlowEdge[]): string[] {
+  if (root === target) return [root];
+  const outgoing = new Map<string, FlowEdge[]>();
+  for (const e of edges) {
+    const list = outgoing.get(e.from);
+    if (list) list.push(e);
+    else outgoing.set(e.from, [e]);
+  }
+  const prev = new Map<string, string>();
+  const seen = new Set([root]);
+  const queue = [root];
+  while (queue.length > 0) {
+    const id = queue.shift() as string;
+    for (const e of outgoing.get(id) ?? []) {
+      if (e.closesCycle || seen.has(e.to)) continue;
+      seen.add(e.to);
+      prev.set(e.to, id);
+      if (e.to === target) {
+        const out = [target];
+        let cur = target;
+        while (prev.has(cur)) {
+          cur = prev.get(cur) as string;
+          out.unshift(cur);
+        }
+        return out;
+      }
+      queue.push(e.to);
+    }
+  }
+  return [];
+}
+
 /** The whole flow: nodes are functions, guards live on edges (design D4). */
-export function flowView(flow: Flow, report: StalenessReport | null = null): FlowView {
+export function flowView(
+  flow: Flow,
+  report: StalenessReport | null = null,
+  opts: FlowViewOptions = {},
+): FlowView {
   const stale = staleIndex(report);
+
+  // Focus selects what is shown. It must not change what any of it means, so
+  // every mark below is computed exactly as it is for the whole flow.
+  const focus = opts.focus && flow.nodes.some((n) => n.id === opts.focus) ? opts.focus : null;
+  const keep = focus ? reachableFrom(focus, flow.edges) : null;
+  const nodes = keep ? flow.nodes.filter((n) => keep.has(n.id)) : flow.nodes;
+  const edges = keep
+    ? flow.edges.filter((e) => keep.has(e.from) && keep.has(e.to))
+    : flow.edges;
+  const holes = keep
+    ? flow.holes.filter((h) => edges.some((e) => e.id === h.siteId))
+    : flow.holes;
+  const labelOf = (id: string) => flow.nodes.find((n) => n.id === id)?.name ?? id;
+  const path = focus
+    ? pathTo(flow.root, focus, flow.edges).map((id) => ({ id, label: labelOf(id) }))
+    : [];
+
   return {
     kind: "flow",
     flow: flow.name,
-    root: flow.root,
+    root: focus ?? flow.root,
+    entryPoint: flow.root,
+    focus,
+    path,
     maxDepth: flow.maxDepth,
     acceptance: acceptanceState(flow, report),
     acceptedRevision: flow.accepted?.revision ?? null,
     broken: flow.broken,
-    nodes: flow.nodes.map((n) => toViewNode(n, flow, stale)),
-    edges: sequence(flow.edges).map(({ edge, depth }) => toViewEdge(edge, stale, depth)),
-    holes: flow.holes.map((h) => ({
+    nodes: nodes.map((n) => toViewNode(n, flow, stale)),
+    edges: sequence(edges).map(({ edge, depth }) => toViewEdge(edge, stale, depth)),
+    holes: holes.map((h) => ({
       id: h.id,
       siteId: h.siteId,
       declaredTarget: h.declaredTarget,
@@ -214,9 +335,9 @@ export function flowView(flow: Flow, report: StalenessReport | null = null): Flo
       candidates: h.candidates,
     })),
     counts: {
-      nodes: flow.nodes.length,
-      edges: flow.edges.length,
-      holes: flow.holes.length,
+      nodes: nodes.length,
+      edges: edges.length,
+      holes: holes.length,
       stale: report?.entries.length ?? 0,
     },
   };

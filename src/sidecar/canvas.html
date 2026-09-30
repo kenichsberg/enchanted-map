@@ -24,6 +24,9 @@
     --verified: #eceaf0; --heuristic: #8da2fb; --unresolved: #fbbf24;
   }
   * { box-sizing: border-box; }
+  /* svg{height:100%} needs a definite chain to resolve against; min-height on
+     body leaves main's height indefinite and the svg collapses. */
+  html, body { height: 100%; }
   body {
     margin: 0; background: var(--bg); color: var(--fg);
     font: 14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
@@ -45,8 +48,29 @@
     border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
   .swatch { width: 22px; height: 0; border-top-width: 2px; display: inline-block; }
-  main { padding: 16px; overflow: auto; }
-  svg { display: block; max-width: 100%; }
+  main { padding: 0; overflow: auto; position: relative; flex: 1 1 auto; min-height: 0; }
+  body { display: flex; flex-direction: column; }
+  svg { display: block; cursor: grab; }
+  main.panning { cursor: grabbing; }
+  #out.text { padding: 16px; overflow: auto; }
+  .zoombar {
+    position: absolute; right: 12px; bottom: 12px; z-index: 3;
+    display: flex; gap: 6px; align-items: center;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 4px 6px; font-size: 12px; color: var(--muted);
+  }
+  .zoombar button { padding: 2px 8px; }
+  .crumb {
+    display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+    padding: 8px 16px; border-bottom: 1px solid var(--line);
+    font-size: 12px; color: var(--muted);
+  }
+  .crumb button {
+    border: none; background: none; color: var(--accent);
+    padding: 1px 4px; font: inherit; cursor: pointer; border-radius: 4px;
+  }
+  .crumb button:hover { background: var(--bg); }
+  .crumb .sep { opacity: 0.5; }
   .node rect { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; rx: 7; }
   .node.root rect { stroke: var(--accent); stroke-width: 2.5; }
   .node.stale rect { stroke: var(--stale); stroke-dasharray: 5 3; }
@@ -65,6 +89,27 @@
   .seq { font-size: 10px; fill: var(--muted); }
   .badge { font-size: 10px; fill: var(--muted); }
   .node.argument rect { stroke-dasharray: 6 2; }
+  .focusbtn { cursor: pointer; }
+  .focusbtn > circle { fill: var(--bg); stroke: var(--line); stroke-width: 1.2; }
+  .focusbtn .pin { fill: var(--muted); stroke: none; }
+  .focusbtn .pinneedle { stroke: var(--muted); stroke-width: 1.3; fill: none; }
+  .focusbtn:hover > circle { stroke: var(--accent); }
+  .focusbtn:hover .pin { fill: var(--accent); }
+  .focusbtn:hover .pinneedle { stroke: var(--accent); }
+  .spinner {
+    position: absolute; inset: 0; display: none; z-index: 4;
+    align-items: center; justify-content: center; gap: 10px;
+    background: color-mix(in srgb, var(--bg) 70%, transparent);
+    color: var(--muted); font-size: 13px;
+  }
+  .spinner[data-on="1"] { display: flex; }
+  .spinner i {
+    width: 15px; height: 15px; border-radius: 50%;
+    border: 2px solid var(--line); border-top-color: var(--accent);
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner i { animation: none; } }
   .dock text { fill: var(--muted); font-size: 11.5px; }
   .dock:hover text { fill: var(--accent); }
   .dock { cursor: pointer; }
@@ -96,8 +141,18 @@
   <span><i class="swatch" style="border-top:2px dotted var(--unresolved)"></i> unresolved dispatch</span>
   <span><i class="swatch" style="border-top:2px dashed var(--stale)"></i> stale</span>
   <span><i class="swatch" style="border-top:1px dashed var(--muted)"></i> argument, evaluated first</span>
+  <span>click a node to jump · pin or double-click to focus · ctrl+scroll to zoom</span>
 </div>
+<div class="crumb" id="crumb" hidden></div>
 <main id="out"><p class="empty">Loading…</p></main>
+<div class="spinner" id="spinner" aria-live="polite"><i></i><span id="spinmsg">analyzing…</span></div>
+<div class="zoombar" id="zoombar" hidden>
+  <button id="zout" title="Zoom out (-)" aria-label="Zoom out">&minus;</button>
+  <span id="zlevel">100%</span>
+  <button id="zin" title="Zoom in (+)" aria-label="Zoom in">+</button>
+  <button id="zfit" title="Fit (0)">Fit</button>
+  <button id="zreset" title="Reset to 1:1 (1)">1:1</button>
+</div>
 
 <script type="module">
 import { esc, renderFlow, renderDiff, renderStale, renderProvenance } from "./render.mjs";
@@ -105,6 +160,7 @@ import { esc, renderFlow, renderDiff, renderStale, renderProvenance } from "./re
 const $ = (id) => document.getElementById(id);
 const out = $("out"), statusEl = $("status");
 let flows = [], current = null;
+let focusId = null;
 
 async function api(method, params = {}) {
   const res = await fetch("/api", {
@@ -117,48 +173,257 @@ async function api(method, params = {}) {
   return body.result;
 }
 
-async function load() {
+/**
+ * Zoom and pan, by rewriting the SVG viewBox.
+ *
+ * Never part of the view: not stored, not sent to the sidecar, and unable to
+ * affect whether a flow reports stale (design D6). It is where this viewer is
+ * looking right now, and nothing more.
+ */
+const viewport = (() => {
+  let svg = null, graph = null, scale = 1;
+
+  const apply = (anchor) => {
+    if (!svg || !graph) return;
+    const before = anchor ?? null;
+    svg.style.width = `${graph.w * scale}px`;
+    svg.style.height = `${graph.h * scale}px`;
+    $("zlevel").textContent = Math.round(scale * 100) + "%";
+    if (before) {
+      // Keep the anchored graph point under the same screen position.
+      out.scrollLeft = before.gx * scale - before.px;
+      out.scrollTop = before.gy * scale - before.py;
+    }
+  };
+
+  const attach = (el) => {
+    svg = el;
+    if (!svg) { $("zoombar").hidden = true; return; }
+    graph = {
+      w: Number(svg.dataset.graphWidth) || 1000,
+      h: Number(svg.dataset.graphHeight) || 600,
+    };
+    $("zoombar").hidden = false;
+    // A legible default beats an overview nobody can read: fit on a large flow
+    // scales the labels below readability (task 7.1).
+    scale = 1;
+    apply();
+    centreOnRoot();
+  };
+
+  /** Scale that would show the whole graph, for the Fit control. */
+  const fitScale = () => {
+    if (!graph) return 1;
+    const r = out.getBoundingClientRect();
+    return Math.max(0.05, Math.min(r.width / graph.w, r.height / graph.h));
+  };
+
+  const fit = () => { scale = fitScale(); apply(); };
+  const reset = () => { scale = 1; apply(); centreOnRoot(); };
+
+  /** Zoom about a point given in client coordinates. */
+  const zoomAt = (factor, clientX, clientY) => {
+    if (!svg || !graph) return;
+    const r = out.getBoundingClientRect();
+    const px = clientX - r.left, py = clientY - r.top;
+    const gx = (out.scrollLeft + px) / scale;
+    const gy = (out.scrollTop + py) / scale;
+    scale = Math.min(Math.max(scale * factor, 0.05), 8);
+    apply({ gx, gy, px, py });
+  };
+
+  const zoomCentre = (factor) => {
+    const r = out.getBoundingClientRect();
+    zoomAt(factor, r.left + r.width / 2, r.top + r.height / 2);
+  };
+
+  /** Put the entry point where the eye starts (task 7.3). */
+  const centreOnRoot = () => {
+    if (!svg || !current || current.kind !== "flow") return;
+    const g = svg.querySelector(`[data-id="${cssEscape(current.root)}"]`);
+    const rect = g && g.querySelector("rect");
+    if (!rect) return;
+    const x = Number(rect.getAttribute("x")) + Number(rect.getAttribute("width")) / 2;
+    const y = Number(rect.getAttribute("y"));
+    const r = out.getBoundingClientRect();
+    out.scrollLeft = Math.max(0, x * scale - r.width / 2);
+    out.scrollTop = Math.max(0, y * scale - 24);
+  };
+
+  /** Scroll position and scale, so a live update can keep them (design D7). */
+  const snapshot = () =>
+    svg ? { scale, left: out.scrollLeft, top: out.scrollTop } : null;
+  const restore = (saved) => {
+    if (!saved || !graph) return;
+    scale = saved.scale;
+    apply();
+    out.scrollLeft = saved.left;
+    out.scrollTop = saved.top;
+  };
+
+  return { attach, fit, reset, zoomAt, zoomCentre, snapshot, restore, centreOnRoot };
+})();
+
+/** CSS.escape, with a fallback for attribute selectors built from ids. */
+function cssEscape(v) {
+  return window.CSS && CSS.escape ? CSS.escape(v) : String(v).replace(/["\\]/g, "\\$&");
+}
+
+function wireViewport() {
+  const svg = out.querySelector("svg");
+  viewport.attach(svg);
+  if (!svg) return;
+
+  // Plain wheel scrolls (that is what the scrollbars are for); ctrl/cmd zooms,
+  // matching every other canvas the reader has used.
+  out.addEventListener("wheel", (ev) => {
+    if (!ev.ctrlKey && !ev.metaKey) return;
+    ev.preventDefault();
+    viewport.zoomAt(ev.deltaY < 0 ? 1.12 : 1 / 1.12, ev.clientX, ev.clientY);
+  }, { passive: false });
+
+  let dragging = null;
+  svg.addEventListener("pointerdown", (ev) => {
+    if (ev.target.closest(".node") || ev.target.closest(".focusbtn")) return;
+    dragging = { x: ev.clientX, y: ev.clientY };
+    out.classList.add("panning");
+  });
+  window.addEventListener("pointermove", (ev) => {
+    if (!dragging) return;
+    out.scrollLeft -= ev.clientX - dragging.x;
+    out.scrollTop -= ev.clientY - dragging.y;
+    dragging = { x: ev.clientX, y: ev.clientY };
+  });
+  window.addEventListener("pointerup", () => {
+    dragging = null;
+    out.classList.remove("panning");
+  });
+}
+
+$("zin").addEventListener("click", () => viewport.zoomCentre(1.2));
+$("zout").addEventListener("click", () => viewport.zoomCentre(1 / 1.2));
+$("zfit").addEventListener("click", () => viewport.fit());
+$("zreset").addEventListener("click", () => viewport.reset());
+
+// Keyboard parity: a wheel-only zoom is unusable without a mouse (design D8).
+document.addEventListener("keydown", (ev) => {
+  if (ev.target instanceof HTMLInputElement || ev.target instanceof HTMLSelectElement) return;
+  if (ev.key === "+" || ev.key === "=") { viewport.zoomCentre(1.2); ev.preventDefault(); }
+  else if (ev.key === "-" || ev.key === "_") { viewport.zoomCentre(1 / 1.2); ev.preventDefault(); }
+  else if (ev.key === "0") { viewport.fit(); ev.preventDefault(); }
+  else if (ev.key === "1") { viewport.reset(); ev.preventDefault(); }
+  else if (ev.key === "Escape" && focusId) { setFocus(null); ev.preventDefault(); }
+});
+
+/** Re-analysis takes seconds; silence reads as failure (task 7.5). */
+function busy(on, msg) {
+  const el = $("spinner");
+  if (msg) $("spinmsg").textContent = msg;
+  el.dataset.on = on ? "1" : "0";
+}
+
+function renderCrumb(view) {
+  const bar = $("crumb");
+  if (!view || view.kind !== "flow" || !view.focus || !view.path?.length) {
+    bar.hidden = true;
+    bar.innerHTML = "";
+    return;
+  }
+  bar.hidden = false;
+  const parts = [`<button data-focus="" title="Back to the whole flow">${esc(view.flow)}</button>`];
+  for (const step of view.path) {
+    parts.push(`<span class="sep">\u203a</span>`);
+    const isLast = step.id === view.focus;
+    parts.push(
+      isLast
+        ? `<strong>${esc(step.label)}</strong>`
+        : `<button data-focus="${esc(step.id)}">${esc(step.label)}</button>`
+    );
+  }
+  parts.push(`<span class="sep">\u00b7</span><span>Esc to leave</span>`);
+  bar.innerHTML = parts.join(" ");
+}
+
+$("crumb").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button[data-focus]");
+  if (b) setFocus(b.dataset.focus || null);
+});
+
+function setFocus(id) {
+  focusId = id || null;
+  load({ refit: true });    // a focus change is a new question, so re-fit (design D7)
+}
+
+async function load(opts = {}) {
   const flow = $("flow").value, lens = $("lens").value;
   if (!flow) { out.innerHTML = `<p class="empty">No flows declared yet.</p>`; return; }
   statusEl.textContent = "analyzing…";
+  busy(true, opts.refit ? "loading…" : "analyzing…");
+  // An update that is not a focus change keeps the viewport, so a re-analysis
+  // does not yank the view away from someone reading a corner of it.
+  const keep = opts.refit ? null : viewport.snapshot();
   try {
-    const view = await api("view", { flow, lens });
+    const view = await api("view", { flow, lens, ...(focusId ? { focus: focusId } : {}) });
     current = view;
+    const isGraph = view.kind === "flow";
+    out.classList.toggle("text", !isGraph);
     out.innerHTML =
-      view.kind === "flow" ? renderFlow(view)
+      isGraph ? renderFlow(view)
       : view.kind === "diff" ? renderDiff(view)
       : view.kind === "staleness" ? renderStale(view)
       : renderProvenance(view);
-    statusEl.textContent = view.kind === "flow"
+    renderCrumb(isGraph ? view : null);
+    if (isGraph) {
+      wireViewport();          // sets a legible default and centres the root
+      if (keep) viewport.restore(keep);
+    } else {
+      $("zoombar").hidden = true;
+    }
+    statusEl.textContent = isGraph
       ? `${view.counts.nodes} nodes · ${view.counts.edges} edges · ${view.counts.holes} holes · ${view.acceptance}`
       : "ready";
   } catch (e) {
     out.innerHTML = `<p class="empty">${esc(e.message)}</p>`;
+    out.classList.add("text");
     statusEl.textContent = "error";
+  } finally {
+    busy(false);
   }
 }
 
 out.addEventListener("click", (ev) => {
+  const fb = ev.target.closest(".focusbtn");
+  if (fb) { ev.preventDefault(); ev.stopPropagation(); setFocus(fb.dataset.focusId); return; }
   const g = ev.target.closest(".node");
   if (!g) return;
   api("jump", { file: g.dataset.file, line: Number(g.dataset.line), character: 0 })
     .then(() => { statusEl.textContent = `jumped to ${g.dataset.file}:${Number(g.dataset.line) + 1}`; })
     .catch((e) => { statusEl.textContent = e.message; });
 });
+out.addEventListener("dblclick", (ev) => {
+  const g = ev.target.closest(".node");
+  if (!g || g.classList.contains("dock")) return;
+  const id = g.dataset.id;
+  if (id) { ev.preventDefault(); setFocus(id); }
+});
 out.addEventListener("keydown", (ev) => {
-  if (ev.key === "Enter" && ev.target.closest(".node")) ev.target.closest(".node").dispatchEvent(new Event("click", { bubbles: true }));
+  const g = ev.target.closest(".node");
+  if (!g) return;
+  if (ev.key === "Enter") g.dispatchEvent(new Event("click", { bubbles: true }));
+  else if (ev.key === "f" && g.dataset.id) { ev.preventDefault(); setFocus(g.dataset.id); }
 });
 
-$("flow").addEventListener("change", load);
-$("lens").addEventListener("change", load);
+$("flow").addEventListener("change", () => { focusId = null; load({ refit: true }); });
+$("lens").addEventListener("change", () => load({ refit: true }));
 $("refresh").addEventListener("click", async () => {
   statusEl.textContent = "re-analyzing…";
+  busy(true, "re-analyzing…");
   try { await api("analyze", { flow: $("flow").value }); await load(); }
-  catch (e) { statusEl.textContent = e.message; }
+  catch (e) { statusEl.textContent = e.message; busy(false); }
 });
 
 const es = new EventSource("/events");
-es.addEventListener("flow", () => load());
+es.addEventListener("flow", () => load());   // keeps the viewport
 es.onopen = () => { if (statusEl.textContent === "connecting…") statusEl.textContent = "connected"; };
 
 (async () => {
