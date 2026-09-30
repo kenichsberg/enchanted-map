@@ -125,6 +125,7 @@ local function render_flow(view)
   end
 
   push(("flow %s  [%s]  depth=%d"):format(view.flow, view.acceptance, view.maxDepth))
+  push("  calls in source order; indented calls are arguments of the call above")
   push(
     ("  %d nodes · %d edges · %d holes · %d stale"):format(
       view.counts.nodes,
@@ -146,9 +147,20 @@ local function render_flow(view)
     if e.stale then
       table.insert(marks, "stale")
     end
-    local text = ("  %s -> %s"):format(label[e.from] or e.from, label[e.to] or e.to)
+    -- A flat list has no spatial axis, so the ordinal carries sequence and the
+    -- indent carries subordination.
+    local indent = string.rep("    ", e.nestingDepth or 0)
+    local text = ("  %2d. %s%s -> %s"):format(
+      e.ordinal or 0,
+      indent,
+      label[e.from] or e.from,
+      label[e.to] or e.to
+    )
     if e.conditionLabel ~= "" then
       text = text .. ("  [%s]"):format(e.conditionLabel)
+    end
+    if e.kind == "argument" then
+      text = text .. "  <- argument, evaluated first"
     end
     if #marks > 0 then
       text = text .. ("  (%s)"):format(table.concat(marks, ","))

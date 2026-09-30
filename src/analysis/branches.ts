@@ -215,6 +215,53 @@ export class BranchIndex {
     };
   }
 
+  /**
+   * Structural facts about a call site: where its call expression begins, and
+   * the call expression that lexically encloses it, if any.
+   *
+   * Both are byte offsets rather than positions. The language server may point
+   * at the method name in `obj.method()` while tree-sitter's `call` node starts
+   * at `obj`, so positions from the two sources do not line up; offsets of the
+   * SAME node always do, which is what lets an argument be linked to the call
+   * it feeds.
+   */
+  callSiteInfo(
+    file: string,
+    position: { line: number; character: number },
+    source?: string,
+  ): { offset: number; enclosingOffset: number | null } | null {
+    const tree = this.load(file, source);
+    const start = tree.rootNode.descendantForPosition({
+      row: position.line,
+      column: position.character,
+    });
+    if (!start) return null;
+
+    // The call expression this site belongs to.
+    let own: Node | null = start;
+    while (own && own.type !== "call") {
+      if (own.type === "function_definition") return null;
+      own = own.parent;
+    }
+    if (!own) return null;
+
+    // The nearest call expression above it, without crossing out of the
+    // enclosing function.
+    let enclosing: Node | null = own.parent;
+    while (enclosing && enclosing.type !== "call") {
+      if (enclosing.type === "function_definition") {
+        enclosing = null;
+        break;
+      }
+      enclosing = enclosing.parent;
+    }
+
+    return {
+      offset: own.startIndex,
+      enclosingOffset: enclosing ? enclosing.startIndex : null,
+    };
+  }
+
   dispose(): void {
     for (const t of this.#trees.values()) t.delete();
     this.#trees.clear();

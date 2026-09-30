@@ -1,4 +1,4 @@
-import type { Condition } from "../analysis/types.ts";
+import type { CallKind, Condition } from "../analysis/types.ts";
 import type { Flow, FlowEdge, FlowNode } from "../flow/model.ts";
 import type { StalenessReport } from "../flow/staleness.ts";
 import { acceptanceState, type AcceptanceState } from "../flow/staleness.ts";
@@ -51,6 +51,22 @@ export interface ViewEdge {
   staleReasons: string[];
   file: string;
   line: number;
+  /** Position among the caller's calls, in source order. */
+  ordinal: number;
+  kind: CallKind;
+  /** For an `argument`, the id of the edge whose call it feeds. */
+  enclosingSite: string | null;
+  /**
+   * How deeply this call is nested in argument positions. 0 is statement level.
+   * A surface can indent by this without walking the chain itself.
+   */
+  nestingDepth: number;
+  /**
+   * True when this call is evaluated before the call it feeds. An argument is
+   * evaluated before the call that consumes it, which is what makes
+   * `notify(SMSSender(), ...)` a sequence rather than two independent calls.
+   */
+  evaluatedBeforeEnclosing: boolean;
 }
 
 export interface FlowView {
@@ -93,7 +109,11 @@ function toViewNode(n: FlowNode, flow: Flow, stale: Map<string, string[]>): View
   };
 }
 
-function toViewEdge(e: FlowEdge, stale: Map<string, string[]>): ViewEdge {
+function toViewEdge(
+  e: FlowEdge,
+  stale: Map<string, string[]>,
+  nestingDepth = 0,
+): ViewEdge {
   const reasons = stale.get(e.id) ?? [];
   return {
     id: e.id,
@@ -110,7 +130,56 @@ function toViewEdge(e: FlowEdge, stale: Map<string, string[]>): ViewEdge {
     staleReasons: reasons,
     file: e.file,
     line: e.line,
+    ordinal: e.ordinal ?? 0,
+    kind: e.kind ?? "call",
+    enclosingSite: e.enclosingSite ?? null,
+    nestingDepth,
+    evaluatedBeforeEnclosing: (e.kind ?? "call") === "argument",
   };
+}
+
+/**
+ * Order a flow's edges so that a caller's calls appear in source order, and an
+ * argument appears directly beneath the call it feeds rather than beside it.
+ *
+ * Returns each edge with the nesting depth a surface should indent by.
+ */
+function sequence(edges: FlowEdge[]): Array<{ edge: FlowEdge; depth: number }> {
+  const byEnclosing = new Map<string, FlowEdge[]>();
+  const roots: FlowEdge[] = [];
+  const known = new Set(edges.map((e) => e.id));
+
+  for (const e of edges) {
+    const enclosing = e.enclosingSite;
+    // An argument whose enclosing call is not in this flow (depth-truncated,
+    // for instance) is presented at statement level rather than dropped.
+    if (e.kind === "argument" && enclosing && known.has(enclosing)) {
+      const list = byEnclosing.get(enclosing);
+      if (list) list.push(e);
+      else byEnclosing.set(enclosing, [e]);
+    } else {
+      roots.push(e);
+    }
+  }
+
+  const bySource = (a: FlowEdge, b: FlowEdge) =>
+    a.from === b.from ? (a.ordinal ?? 0) - (b.ordinal ?? 0) : a.from.localeCompare(b.from);
+
+  const out: Array<{ edge: FlowEdge; depth: number }> = [];
+  const emit = (edge: FlowEdge, depth: number, seen: Set<string>): void => {
+    if (seen.has(edge.id)) return; // defensive: a cycle in enclosing links
+    seen.add(edge.id);
+    out.push({ edge, depth });
+    for (const child of (byEnclosing.get(edge.id) ?? []).sort(bySource)) {
+      emit(child, depth + 1, seen);
+    }
+  };
+
+  const seen = new Set<string>();
+  for (const e of [...roots].sort(bySource)) emit(e, 0, seen);
+  // Anything unreachable through the tree still appears, so nothing is lost.
+  for (const e of edges) if (!seen.has(e.id)) emit(e, 0, seen);
+  return out;
 }
 
 /** The whole flow: nodes are functions, guards live on edges (design D4). */
@@ -125,7 +194,7 @@ export function flowView(flow: Flow, report: StalenessReport | null = null): Flo
     acceptedRevision: flow.accepted?.revision ?? null,
     broken: flow.broken,
     nodes: flow.nodes.map((n) => toViewNode(n, flow, stale)),
-    edges: flow.edges.map((e) => toViewEdge(e, stale)),
+    edges: sequence(flow.edges).map(({ edge, depth }) => toViewEdge(edge, stale, depth)),
     holes: flow.holes.map((h) => ({
       id: h.id,
       siteId: h.siteId,

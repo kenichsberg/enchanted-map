@@ -134,9 +134,14 @@ export class DispatchResolver {
    *
    * The dispatching call lives in some function F. We look at the call sites
    * where F itself is invoked, and ask which candidate classes are constructed
-   * at that same call site. One distinct class resolves it; anything else
-   * leaves the hole open, because guessing here is worse than admitting we
-   * do not know.
+   * AS ARGUMENTS of that call. One distinct class resolves it; anything else
+   * leaves the hole open, because guessing here is worse than admitting we do
+   * not know.
+   *
+   * This used to match on a shared source line, which is a lossy proxy for the
+   * same idea: it accepts an unrelated constructor that happens to sit on the
+   * line, and misses one in a call split across lines. Argument nesting is the
+   * relationship the rule was always trying to express.
    */
   async #resolveByConstruction(
     facts: FlowFacts,
@@ -157,9 +162,8 @@ export class DispatchResolver {
     const constructed = new Set<string>();
     for (const call of inbound) {
       for (const sibling of facts.edges) {
-        if (sibling.from !== call.from) continue;
-        if (sibling.site.file !== call.site.file) continue;
-        if (sibling.site.range.start.line !== call.site.range.start.line) continue;
+        if (sibling.site.kind !== "argument") continue;
+        if (sibling.site.enclosingSite !== call.site.id) continue;
         const ctor = facts.symbols[sibling.to];
         if (ctor && ctor.kind === KIND.Class && owners.has(ctor.name)) {
           constructed.add(ctor.name);

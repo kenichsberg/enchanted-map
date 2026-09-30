@@ -86,7 +86,7 @@ function renderFacts(facts: FlowFacts): string {
   out.push(`edges:    ${facts.edges.length}`);
   out.push(`holes:    ${facts.unresolved.length}`);
   out.push("");
-  out.push("edges:");
+  out.push("edges (source order):");
   for (const e of facts.edges) {
     const cond =
       e.site.conditions.length > 0
@@ -104,9 +104,13 @@ function renderFacts(facts: FlowFacts): string {
     ]
       .filter(Boolean)
       .join(",");
+    const nest =
+      e.site.kind === "argument"
+        ? `  argument of -> ${facts.edges.find((o) => o.id === e.site.enclosingSite)?.to.split("#").pop() ?? "?"}`
+        : "";
     out.push(
-      `  ${sym(e.from)} -> ${sym(e.to)}` +
-        `  @${e.site.file}:${e.site.range.start.line + 1}${cond}` +
+      `  ${String(e.site.ordinal).padStart(2)}. ${sym(e.from)} -> ${sym(e.to)}` +
+        `  @${e.site.file}:${e.site.range.start.line + 1}${cond}${nest}` +
         (marks ? `  (${marks})` : ""),
     );
   }
@@ -245,7 +249,8 @@ async function cmdView(args: Args): Promise<number> {
   const svc = new FlowService(root);
   const lens = String(args.flags["lens"] ?? "flow");
   const status = await svc.status(name);
-  const stored = status.stored ?? status.current;
+  const usableStored = status.stored && !status.stored.legacy ? status.stored : null;
+  const stored = usableStored ?? status.current ?? status.stored;
   if (!stored) {
     process.stderr.write(
       status.error
@@ -292,6 +297,8 @@ function renderView(view: unknown): string {
         `${f.counts.stale} stale`,
     );
     out.push("");
+    out.push("  calls in source order; indented calls are arguments of the call above");
+    out.push("");
     for (const e of f.edges) {
       const cond = e.conditionLabel ? `  [${e.conditionLabel}]` : "";
       const marks = [
@@ -299,8 +306,11 @@ function renderView(view: unknown): string {
         e.closesCycle ? "cycle" : null,
         e.stale ? `stale:${e.staleReasons.join("/")}` : null,
       ].filter(Boolean);
+      const indent = "    ".repeat(e.nestingDepth);
+      const arg = e.kind === "argument" ? "  <- argument, evaluated first" : "";
       out.push(
-        `  ${label(e.from)} -> ${label(e.to)}${cond}` +
+        `  ${String(e.ordinal).padStart(2)}. ${indent}${label(e.from)} -> ${label(e.to)}` +
+          `${cond}${arg}` +
           (marks.length ? `  (${marks.join(",")})` : ""),
       );
     }

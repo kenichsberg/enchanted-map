@@ -59,3 +59,32 @@ def pong(n: int) -> None:
     # mutual recursion
     if n > 0:
         ping(n - 1)
+
+
+def combine(a: str, b: str) -> str:
+    return a + b
+
+
+def two_args(user: str) -> None:
+    # Two calls as separate arguments of one call: both are arguments of the
+    # same enclosing call site, ordered between themselves.
+    audit(combine(user, "x"), combine("y", user))
+
+
+def same_line_decoy(user: str) -> None:
+    # SMSSender is constructed on the same source line as the call into
+    # notify(), but is NOT an argument of it. A same-line rule sees two
+    # candidates and gives up; an is-argument-of rule sees exactly one.
+    spare = SMSSender(); notify(EmailSender(), "decoy")
+    _ = spare
+
+
+def describe(user: str) -> str:
+    # An argument call that has a body of its own: docking it would hide a node
+    # with outgoing edges, so it must stay free-standing.
+    audit("describe", user)
+    return user
+
+
+def arg_with_subtree(user: str) -> None:
+    audit(describe(user), "x")

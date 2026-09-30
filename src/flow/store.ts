@@ -57,7 +57,15 @@ export function readFlow(root: string, name: string): Flow | null {
     maxDepth: raw.maxDepth ?? 3,
     root: raw.root ?? "",
     nodes: raw.nodes ?? [],
-    edges: raw.edges ?? [],
+    // A flow stored before call ordering existed has no ordinal or kind.
+    // Defaults keep it parseable, but `legacy` below records that the file
+    // cannot express ordering or nesting, so nothing presents it as current.
+    edges: (raw.edges ?? []).map((e) => ({
+      ...e,
+      ordinal: e.ordinal ?? 0,
+      kind: e.kind ?? "call",
+      enclosingSite: e.enclosingSite ?? null,
+    })),
     holes: raw.holes ?? [],
     truncated: raw.truncated ?? [],
     external: raw.external ?? [],
@@ -65,6 +73,9 @@ export function readFlow(root: string, name: string): Flow | null {
     judgments: { ...emptyJudgments(), ...judgments },
     accepted: raw.accepted ?? null,
     broken: raw.broken ?? false,
+    legacy: (raw.edges ?? []).some(
+      (e) => e.kind === undefined || e.ordinal === undefined,
+    ),
   };
 }
 

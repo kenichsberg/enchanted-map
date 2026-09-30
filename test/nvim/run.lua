@@ -82,6 +82,34 @@ check("buffer shows a guard on an edge", text:match("%[mfa%]") ~= nil, "no [mfa]
 check("buffer shows the negated guard", text:match("%[!mfa%]") ~= nil)
 check("buffer marks heuristic provenance", text:match("heuristic") ~= nil)
 
+-- Call sequence and argument nesting in the listing.
+check(
+  "listing numbers calls in source order",
+  text:match("%s0%. .-login %-> audit") ~= nil,
+  lines[4] or "(no line 4)"
+)
+local sms_line, notify_line, sms_text
+for i, l in ipairs(lines) do
+  if l:match("%-> notify") then notify_line = i end
+  if l:match("%-> SMSSender") then sms_line, sms_text = i, l end
+end
+check("listing contains the argument call", sms_line ~= nil)
+check(
+  "the argument follows the call it feeds",
+  notify_line ~= nil and sms_line ~= nil and sms_line == notify_line + 1,
+  ("notify at %s, SMSSender at %s"):format(tostring(notify_line), tostring(sms_line))
+)
+check(
+  "the argument is marked as evaluated first",
+  sms_text ~= nil and sms_text:match("argument, evaluated first") ~= nil,
+  sms_text
+)
+check(
+  "the argument is indented beneath its call",
+  sms_text ~= nil and sms_text:match("^%s+%d+%.%s%s%s%s+") ~= nil,
+  sms_text
+)
+
 -- 4. Jump to source from the map buffer.
 local map_buf = vim.api.nvim_get_current_buf()
 local target_line

@@ -1,7 +1,13 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { hashContent, hashParts } from "../cache/store.ts";
-import type { Condition, FlowFacts, SymbolId, SymbolRef } from "../analysis/types.ts";
+import type {
+  CallKind,
+  Condition,
+  FlowFacts,
+  SymbolId,
+  SymbolRef,
+} from "../analysis/types.ts";
 
 /** A node as persisted in a flow file. */
 export interface FlowNode {
@@ -31,6 +37,11 @@ export interface FlowEdge {
   line: number;
   character: number;
   conditions: Condition[];
+  /** Position among the caller's call sites, in source order. */
+  ordinal: number;
+  kind: CallKind;
+  /** For an `argument`, the id of the edge whose call site it feeds. */
+  enclosingSite: string | null;
   provenance: string;
   declaredTarget: SymbolId | null;
   candidates: SymbolId[];
@@ -80,6 +91,12 @@ export interface Flow {
   accepted: AcceptStamp | null;
   /** True when the entry point no longer resolves; the file is kept regardless. */
   broken: boolean;
+  /**
+   * True when the stored file predates fields this version records, so it
+   * cannot express the current model. Such a flow must not be presented as if
+   * it were current: a silently defaulted map looks right and is not.
+   */
+  legacy: boolean;
 }
 
 export function emptyJudgments(): FlowJudgments {
@@ -141,9 +158,28 @@ export const depHashes = {
   node(defHash: string): string {
     return hashParts("node", defHash);
   },
-  /** An edge depends on its call-site line and the guards reaching it. */
-  edge(callLineText: string, conditions: Condition[]): string {
-    return hashParts("edge", callLineText, serialiseConditions(conditions));
+  /**
+   * An edge depends on its call-site line, the guards reaching it, and how it
+   * is reached -- statement level, or as an argument of a particular call.
+   *
+   * The source ordinal is deliberately absent. Including it would mean that
+   * inserting one call at the top of a function renumbers every later call and
+   * marks all of their edges stale: the same "a small change looks like a big
+   * one" failure that line-numbered identifiers caused (design D4).
+   */
+  edge(
+    callLineText: string,
+    conditions: Condition[],
+    kind: CallKind,
+    enclosingSite: string | null,
+  ): string {
+    return hashParts(
+      "edge",
+      callLineText,
+      serialiseConditions(conditions),
+      kind,
+      enclosingSite ?? "",
+    );
   },
   /** A hole depends on the declared target and the candidate set -- not on any body. */
   hole(declaredTarget: SymbolId, candidates: SymbolId[]): string {
@@ -185,6 +221,9 @@ export function flowFromFacts(
       line: e.site.range.start.line,
       character: e.site.range.start.character,
       conditions: e.site.conditions,
+      ordinal: e.site.ordinal,
+      kind: e.site.kind,
+      enclosingSite: e.site.enclosingSite,
       provenance: e.provenance,
       declaredTarget: e.declaredTarget,
       candidates: e.candidates.map((c) => c.id).sort(),
@@ -192,9 +231,13 @@ export function flowFromFacts(
       depHash: depHashes.edge(
         lineText(root, e.site.file, e.site.range.start.line),
         e.site.conditions,
+        e.site.kind,
+        e.site.enclosingSite,
       ),
     }))
-    .sort((a, b) => a.id.localeCompare(b.id));
+    .sort((a, b) =>
+      a.from === b.from ? a.ordinal - b.ordinal : a.from.localeCompare(b.from),
+    );
 
   const holes: FlowHole[] = facts.unresolved
     .map((h) => {
@@ -225,5 +268,6 @@ export function flowFromFacts(
     judgments: previous?.judgments ?? emptyJudgments(),
     accepted: previous?.accepted ?? null,
     broken: false,
+    legacy: false,
   };
 }

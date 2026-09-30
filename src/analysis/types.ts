@@ -49,6 +49,15 @@ export interface Condition {
   line: number;
 }
 
+/**
+ * How a call site is reached within its caller.
+ *
+ * `argument` means the call is lexically an argument of another call, and is
+ * therefore evaluated before it -- the relationship that makes
+ * `notify(SMSSender(), "code")` a sequence rather than two independent calls.
+ */
+export type CallKind = "call" | "argument";
+
 export interface CallSite {
   id: string;
   /** File containing the call expression (the caller's file). */
@@ -59,6 +68,15 @@ export interface CallSite {
    * Conditions live on the call site, never on a node (design D4).
    */
   conditions: Condition[];
+  /**
+   * Position among the caller's call sites, in source order. Location metadata:
+   * deliberately NOT part of any dependency hash, because inserting one call
+   * would otherwise renumber every later call and mark them all stale.
+   */
+  ordinal: number;
+  kind: CallKind;
+  /** For an `argument`, the id of the call site it feeds. */
+  enclosingSite: string | null;
 }
 
 /**

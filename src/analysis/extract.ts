@@ -6,6 +6,7 @@ import type { FactCache } from "../cache/store.ts";
 import { hashParts } from "../cache/store.ts";
 import { canonicalCached } from "../util/paths.ts";
 import {
+  type CallSite,
   type Edge,
   type FlowFacts,
   type SymbolId,
@@ -186,41 +187,89 @@ export class Extractor {
       onPath.add(node.id);
 
       const calls = await this.outgoing(node);
-      // Ordinal per (caller, callee) pair, in the order the server reports the
-      // call sites -- which is source order.
-      const ordinals = new Map<string, number>();
+
+      // Pass 1: flatten this caller's call sites and learn their structure.
+      // The language server groups call sites by callee, so its order says
+      // nothing about the order the code runs in.
+      interface RawSite {
+        target: SymbolRef;
+        fromRange: Range;
+        /** Byte offset of the call expression; the key arguments link on. */
+        offset: number | null;
+        enclosingOffset: number | null;
+        /** Ordering key, usable even when tree-sitter could not locate the call. */
+        sortKey: number;
+      }
+      const raws: RawSite[] = [];
+      const uniqueTargets: SymbolRef[] = [];
+      const seenTargets = new Set<SymbolId>();
+
       for (const call of calls) {
         const target = this.toSymbolRef(call.to);
         symbols[target.id] ??= target;
-        const closes = onPath.has(target.id);
-        if (closes) cycles.add(target.id);
-
-        const sorted = [...call.fromRanges].sort(
-          (a, b) => a.start.line - b.start.line || a.start.character - b.start.character,
-        );
-        for (const fromRange of sorted) {
-          const pairKey = `${node.id}->${target.id}`;
-          const ordinal = ordinals.get(pairKey) ?? 0;
-          ordinals.set(pairKey, ordinal + 1);
-          const id = edgeId(node.id, target.id, ordinal);
-          const site = {
-            id,
-            file: node.file,
-            range: fromRange,
-            conditions: this.#branches?.conditionsAt(node.file, fromRange) ?? [],
-          };
-          edges.push({
-            id,
-            from: node.id,
-            to: target.id,
-            site,
-            provenance: "lsp-verified",
-            candidates: [],
-            closesCycle: closes,
-            declaredTarget: null,
+        if (!seenTargets.has(target.id)) {
+          seenTargets.add(target.id);
+          uniqueTargets.push(target);
+        }
+        for (const fromRange of call.fromRanges) {
+          const info = this.#branches?.callSiteInfo(node.file, fromRange.start) ?? null;
+          raws.push({
+            target,
+            fromRange,
+            offset: info?.offset ?? null,
+            enclosingOffset: info?.enclosingOffset ?? null,
+            sortKey:
+              info?.offset ??
+              fromRange.start.line * 1_000_000 + fromRange.start.character,
           });
         }
-        if (!closes) await visit(target, depth + 1);
+      }
+
+      // Pass 2: source order, then identity. Within a (caller, callee) pair the
+      // relative order is unchanged, so edge ids stay exactly as before.
+      raws.sort((a, b) => a.sortKey - b.sortKey);
+      const pairOrdinals = new Map<string, number>();
+      const siteIdByOffset = new Map<number, string>();
+      const assigned = raws.map((raw, index) => {
+        const pairKey = `${node.id}->${raw.target.id}`;
+        const pairOrdinal = pairOrdinals.get(pairKey) ?? 0;
+        pairOrdinals.set(pairKey, pairOrdinal + 1);
+        const id = edgeId(node.id, raw.target.id, pairOrdinal);
+        if (raw.offset !== null) siteIdByOffset.set(raw.offset, id);
+        return { raw, id, ordinal: index };
+      });
+
+      for (const { raw, id, ordinal } of assigned) {
+        const enclosingSite =
+          raw.enclosingOffset !== null
+            ? (siteIdByOffset.get(raw.enclosingOffset) ?? null)
+            : null;
+        const closes = onPath.has(raw.target.id);
+        if (closes) cycles.add(raw.target.id);
+
+        const site: CallSite = {
+          id,
+          file: node.file,
+          range: raw.fromRange,
+          conditions: this.#branches?.conditionsAt(node.file, raw.fromRange) ?? [],
+          ordinal,
+          kind: enclosingSite !== null ? "argument" : "call",
+          enclosingSite,
+        };
+        edges.push({
+          id,
+          from: node.id,
+          to: raw.target.id,
+          site,
+          provenance: "lsp-verified",
+          candidates: [],
+          closesCycle: closes,
+          declaredTarget: null,
+        });
+      }
+
+      for (const target of uniqueTargets) {
+        if (!onPath.has(target.id)) await visit(target, depth + 1);
       }
 
       onPath.delete(node.id);
