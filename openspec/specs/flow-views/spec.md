@@ -21,6 +21,10 @@ The whole-flow view SHALL present the entry point and its bounded call tree, wit
 representing functions only. Branch conditions MUST be carried on edges. The number of nodes
 MUST NOT increase as a result of branching.
 
+An edge's rendered condition label SHALL be built from its guards of category `branch` and
+`loop`. A guard of category `context` MUST NOT appear in that label, because its body always
+runs and presenting it as a condition asserts a choice that does not exist.
+
 Edges MUST be presented in source order. An edge whose call site is an argument of another
 call MUST be presented as subordinate to that call rather than as a sibling of it, and MUST
 be identifiable as evaluated before the call it feeds. The number of nodes MUST NOT increase
@@ -64,6 +68,14 @@ as a result of nesting.
 #### Scenario: A flow with no nesting is unaffected
 - **WHEN** every call in a flow is at statement level
 - **THEN** the view presents them as siblings in source order, with no subordination
+
+#### Scenario: A context guard does not appear as a condition
+- **WHEN** a call is guarded only by a `with` block
+- **THEN** its edge's condition label is empty
+
+#### Scenario: A selecting guard survives an enclosing context guard
+- **WHEN** a call is inside a `with` block and inside an `if` within it
+- **THEN** the label carries the `if` condition alone
 
 ### Requirement: Diff view against a revision
 

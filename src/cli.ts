@@ -3,7 +3,13 @@ import path from "node:path";
 import { LanguageServer } from "./lsp/server.ts";
 import { FlowService } from "./flow/service.ts";
 import { declareEntryPoint } from "./flow/config.ts";
-import { flowView, diffView, stalenessView, provenanceView } from "./views/index.ts";
+import {
+  flowView,
+  diffView,
+  stalenessView,
+  provenanceView,
+  conditionLabel,
+} from "./views/index.ts";
 import { Sidecar, serveStdio } from "./sidecar/server.ts";
 import { Extractor } from "./analysis/extract.ts";
 import { BranchIndex } from "./analysis/branches.ts";
@@ -88,14 +94,11 @@ function renderFacts(facts: FlowFacts): string {
   out.push("");
   out.push("edges (source order):");
   for (const e of facts.edges) {
-    const cond =
-      e.site.conditions.length > 0
-        ? "  [" +
-          e.site.conditions
-            .map((c) => (c.negated ? `!${c.text ?? c.kind}` : (c.text ?? c.kind)))
-            .join(" && ") +
-          "]"
-        : "";
+    // Use the view layer's label rather than a second copy of the rule: this
+    // dump had its own, so filtering context guards in one place left the
+    // other showing them.
+    const label = conditionLabel(e.site.conditions);
+    const cond = label ? `  [${label}]` : "";
     const marks = [
       e.closesCycle ? "cycle" : null,
       e.provenance !== "lsp-verified" ? e.provenance : null,

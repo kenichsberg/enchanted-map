@@ -142,8 +142,26 @@ function lineText(root: string, file: string, line: number): string {
   }
 }
 
+/**
+ * Only the guards that reach the label participate in the hash.
+ *
+ * Writing the category into the string instead would have changed the hash of
+ * every guarded edge in every stored flow, including `if`/`else`/`for` edges
+ * whose label did not move at all -- churn with no meaning behind it, which is
+ * the fastest way to teach someone that staleness reports are noise. Excluding
+ * context guards instead makes the churn exactly the edges whose label really
+ * changed (design D4).
+ *
+ * The cost: reclassifying a construct between `branch` and `loop` would not
+ * register here. That can only happen through an edit to the classification
+ * table in this repository, not through a change to the analysed code, so it
+ * is a re-analysis to remember rather than a detection to rely on.
+ */
 function serialiseConditions(conds: Condition[]): string {
-  return conds.map((c) => `${c.kind}:${c.negated ? "!" : ""}${c.text ?? ""}`).join("|");
+  return conds
+    .filter((c) => (c.category ?? "branch") !== "context")
+    .map((c) => `${c.kind}:${c.negated ? "!" : ""}${c.text ?? ""}`)
+    .join("|");
 }
 
 /**

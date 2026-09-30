@@ -88,3 +88,36 @@ def describe(user: str) -> str:
 
 def arg_with_subtree(user: str) -> None:
     audit(describe(user), "x")
+
+
+class _Step:
+    """A trivial context manager, so the fixture can use `with` as a structuring
+    idiom the way real orchestration code does."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+
+    def __enter__(self) -> "_Step":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+def with_structured(user: str) -> None:
+    # A `with` body always runs, so these calls are not conditional at all.
+    with _Step("load"):
+        audit("load", user)
+    with _Step("check"):
+        # …but this one is, and the `if` must survive the enclosing `with`.
+        if user:
+            create_session(user)
+
+
+def with_try(user: str) -> None:
+    try:
+        audit("try", user)
+    except ValueError:
+        create_session(user)
+    finally:
+        audit("done", user)

@@ -37,10 +37,28 @@ export interface SymbolRef {
   external: boolean;
 }
 
+/**
+ * What a guarding construct does to control flow.
+ *
+ * Guards were modelled as a single kind, so a call inside `with _step("load"):`
+ * carried that whole expression as its condition. The label was not wrong, but
+ * a `with` body always runs: it answers a question nobody asked, and crowds out
+ * the case where a guard carries real information, such as `[mfa]` vs `[!mfa]`.
+ */
+export type GuardCategory =
+  /** The body runs instead of another body: if, elif, else, case, except. */
+  | "branch"
+  /** The body runs zero or more times: for, while. */
+  | "loop"
+  /** The body always runs: with, finally. */
+  | "context";
+
 /** A guarding construct enclosing a call site (design D3). */
 export interface Condition {
   /** tree-sitter node type, e.g. `if_statement`, `else_clause`, `for_statement`. */
   kind: string;
+  /** Effect on control flow. Governs presentation, never collection (design D1). */
+  category: GuardCategory;
   /** Source text of the controlling expression, where one exists. */
   text: string | null;
   /** True when this guard is the negative arm (`else`). */

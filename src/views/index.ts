@@ -9,9 +9,20 @@ import { acceptanceState, type AcceptanceState } from "../flow/staleness.ts";
  * the same output (design D13).
  */
 
+/**
+ * Guards that say something about *whether* a call runs.
+ *
+ * A `context` guard's body always runs, so rendering it as a condition asserts
+ * a choice that does not exist -- and buries the guards that do (design D3).
+ */
+const LABELLED_CATEGORIES = new Set(["branch", "loop"]);
+
 export function conditionLabel(conditions: Condition[]): string {
-  if (conditions.length === 0) return "";
-  return conditions
+  const selecting = conditions.filter((c) =>
+    LABELLED_CATEGORIES.has(c.category ?? "branch"),
+  );
+  if (selecting.length === 0) return "";
+  return selecting
     .map((c) => {
       const body = c.text ?? c.kind.replace(/_/g, " ");
       return c.negated ? `!${body}` : body;

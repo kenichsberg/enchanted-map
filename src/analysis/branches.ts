@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { Parser, Language, type Node, type Tree } from "web-tree-sitter";
-import type { Condition, Range } from "./types.ts";
+import type { Condition, GuardCategory, Range } from "./types.ts";
 import { canonical } from "../util/paths.ts";
 
 const GRAMMAR = path.resolve(
@@ -31,6 +31,26 @@ function text(node: Node | null): string | null {
  * Guarding constructs, and how to describe them. A call's guards are collected
  * by walking UP from the call site; the language server never reports these.
  */
+/** Effect on control flow, per construct (design D1). */
+const GUARD_CATEGORY: Record<string, GuardCategory> = {
+  if_statement: "branch",
+  elif_clause: "branch",
+  else_clause: "branch",
+  // The body runs only when the matching error is raised, which is a selection
+  // -- on an implicit condition rather than a written one (design D2).
+  except_clause: "branch",
+  case_clause: "branch",
+  conditional_expression: "branch",
+  for_statement: "loop",
+  while_statement: "loop",
+  with_statement: "context",
+  finally_clause: "context",
+};
+
+function categoryOf(kind: string): GuardCategory {
+  return GUARD_CATEGORY[kind] ?? "branch";
+}
+
 function guardFor(node: Node, cameFrom: Node | null): Condition | null {
   const line = node.startPosition.row;
   switch (node.type) {
@@ -41,6 +61,7 @@ function guardFor(node: Node, cameFrom: Node | null): Condition | null {
       if (cameFrom && consequence && cameFrom.id === consequence.id) {
         return {
           kind: "if_statement",
+          category: categoryOf("if_statement"),
           text: text(node.childForFieldName("condition")),
           negated: false,
           line,
@@ -51,6 +72,7 @@ function guardFor(node: Node, cameFrom: Node | null): Condition | null {
     case "elif_clause":
       return {
         kind: "elif_clause",
+        category: categoryOf("elif_clause"),
         text: text(node.childForFieldName("condition")),
         negated: false,
         line,
@@ -62,7 +84,13 @@ function guardFor(node: Node, cameFrom: Node | null): Condition | null {
         owner?.type === "if_statement" || owner?.type === "while_statement"
           ? text(owner.childForFieldName("condition"))
           : null;
-      return { kind: "else_clause", text: cond, negated: true, line };
+      return {
+        kind: "else_clause",
+        category: categoryOf("else_clause"),
+        text: cond,
+        negated: true,
+        line,
+      };
     }
     case "for_statement": {
       const body = node.childForFieldName("body");
@@ -71,6 +99,7 @@ function guardFor(node: Node, cameFrom: Node | null): Condition | null {
       const right = text(node.childForFieldName("right"));
       return {
         kind: "for_statement",
+        category: categoryOf("for_statement"),
         text: left && right ? `for ${left} in ${right}` : null,
         negated: false,
         line,
@@ -81,30 +110,56 @@ function guardFor(node: Node, cameFrom: Node | null): Condition | null {
       if (cameFrom && body && cameFrom.id !== body.id) return null;
       return {
         kind: "while_statement",
+        category: categoryOf("while_statement"),
         text: text(node.childForFieldName("condition")),
         negated: false,
         line,
       };
     }
     case "except_clause":
-      return { kind: "except_clause", text: text(node.namedChild(0)), negated: false, line };
+      return {
+        kind: "except_clause",
+        category: categoryOf("except_clause"),
+        text: text(node.namedChild(0)),
+        negated: false,
+        line,
+      };
     case "finally_clause":
-      return { kind: "finally_clause", text: null, negated: false, line };
+      return {
+        kind: "finally_clause",
+        category: categoryOf("finally_clause"),
+        text: null,
+        negated: false,
+        line,
+      };
     case "with_statement":
       return {
         kind: "with_statement",
+        category: categoryOf("with_statement"),
         text: text(node.childForFieldName("body") ? node.namedChild(0) : null),
         negated: false,
         line,
       };
     case "case_clause":
-      return { kind: "case_clause", text: text(node.namedChild(0)), negated: false, line };
+      return {
+        kind: "case_clause",
+        category: categoryOf("case_clause"),
+        text: text(node.namedChild(0)),
+        negated: false,
+        line,
+      };
     case "conditional_expression": {
       // `a() if cond else b()` -- which arm did we come from?
       const parts = node.namedChildren.filter((c): c is Node => c !== null);
       const cond = parts[1] ? text(parts[1]) : null;
       const negated = Boolean(cameFrom && parts[2] && cameFrom.id === parts[2].id);
-      return { kind: "conditional_expression", text: cond, negated, line };
+      return {
+        kind: "conditional_expression",
+        category: categoryOf("conditional_expression"),
+        text: cond,
+        negated,
+        line,
+      };
     }
     default:
       return null;

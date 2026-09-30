@@ -177,8 +177,8 @@ test("condition labels render negation and conjunction", () => {
   assert.equal(conditionLabel([]), "");
   assert.equal(
     conditionLabel([
-      { kind: "for_statement", text: "for u in users", negated: false, line: 0 },
-      { kind: "else_clause", text: "urgent", negated: true, line: 1 },
+      { kind: "for_statement", category: "loop", text: "for u in users", negated: false, line: 0 },
+      { kind: "else_clause", category: "branch", text: "urgent", negated: true, line: 1 },
     ]),
     "for u in users && !urgent",
   );
