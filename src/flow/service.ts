@@ -4,6 +4,7 @@ import { readFlow, writeFlow, listFlows, markBroken } from "./store.ts";
 import { computeStaleness, currentRevision, accept, type StalenessReport } from "./staleness.ts";
 import type { Flow } from "./model.ts";
 import { FactCache } from "../cache/store.ts";
+import { resolveMarkers } from "../analysis/vendor.ts";
 import { canonical } from "../util/paths.ts";
 
 export interface FlowStatus {
@@ -56,9 +57,11 @@ export class FlowService {
       );
     }
     this.#cache.invalidateFileHashes();
+    const config = this.config();
     return new FlowAnalyzer(this.root, {
-      maxDepth: this.config().maxDepth,
+      maxDepth: config.maxDepth,
       cache: this.#cache,
+      markers: resolveMarkers(config.vendor),
     }).analyze(decl);
   }
 

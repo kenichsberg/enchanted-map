@@ -6,6 +6,11 @@ import type { FactCache } from "../cache/store.ts";
 import { hashParts } from "../cache/store.ts";
 import { canonicalCached } from "../util/paths.ts";
 import {
+  DEFAULT_VENDOR_MARKERS,
+  externalLabel,
+  isExternal,
+} from "./vendor.ts";
+import {
   type CallSite,
   type Edge,
   type FlowFacts,
@@ -40,16 +45,27 @@ export class Extractor {
   #root: string;
   #branches: BranchIndex | null;
   #cache: FactCache | null = null;
+  /** Directory names that mark third-party code (design D5). */
+  #markers: readonly string[];
 
   /**
    * `branches` supplies the guards enclosing each call site. The language
    * server reports where a call happens; only tree-sitter can say under what
    * condition it is reached (design D3).
    */
-  constructor(server: LanguageServer, branches?: BranchIndex) {
+  constructor(
+    server: LanguageServer,
+    branches?: BranchIndex,
+    markers: readonly string[] = DEFAULT_VENDOR_MARKERS,
+  ) {
     this.#server = server;
     this.#root = canonicalCached(server.root);
     this.#branches = branches ?? null;
+    this.#markers = markers;
+  }
+
+  get markers(): readonly string[] {
+    return this.#markers;
   }
 
   /** Attach a fact cache. Unchanged content is then served without LSP traffic. */
@@ -63,29 +79,12 @@ export class Extractor {
     return path.relative(this.#root, file).split(path.sep).join("/");
   }
 
-  /** A path outside the project root escapes it with a leading `..`. */
-  static isExternal(relPath: string): boolean {
-    return relPath.startsWith("../") || path.isAbsolute(relPath);
-  }
-
-  /**
-   * Machine-independent label for a file outside the project.
-   *
-   * The real path runs through node_modules and differs per checkout; flow
-   * files are committed, so an absolute path there would produce spurious
-   * diffs for every teammate.
-   */
-  static externalLabel(relPath: string): string {
-    const marker = "node_modules/";
-    const idx = relPath.lastIndexOf(marker);
-    if (idx >= 0) return `<ext>/${relPath.slice(idx + marker.length)}`;
-    return `<ext>/${relPath.split("/").pop() ?? relPath}`;
-  }
-
   toSymbolRef(item: CallHierarchyItem): SymbolRef {
     const raw = this.relative(item.uri);
-    const external = Extractor.isExternal(raw);
-    const file = external ? Extractor.externalLabel(raw) : raw;
+    // Not the project's own source: outside the root, or a dependency living
+    // inside it. The two are deliberately indistinguishable downstream.
+    const external = isExternal(raw, this.#markers);
+    const file = external ? externalLabel(raw, this.#markers) : raw;
 
     // Identity and body come from tree-sitter: the language server's range is
     // too narrow to hash, and a line-based id churns on any insertion above.

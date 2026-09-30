@@ -12,6 +12,8 @@ export interface AnalyzeOptions {
   maxDepth?: number;
   cache?: FactCache;
   serverCommand?: string[];
+  /** Directory names marking third-party code; defaults when omitted. */
+  markers?: readonly string[];
 }
 
 export class BrokenEntryPointError extends Error {
@@ -41,7 +43,7 @@ export class FlowAnalyzer {
     await server.start();
     try {
       const branches = await BranchIndex.create(this.root);
-      const extractor = new Extractor(server, branches);
+      const extractor = new Extractor(server, branches, this.#opts.markers);
       const cache = this.#opts.cache ?? new FactCache(this.root);
       extractor.withCache(cache);
 

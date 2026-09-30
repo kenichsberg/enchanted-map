@@ -8,7 +8,11 @@ import { FlowService } from "../../src/flow/service.ts";
 import { declareEntryPoint } from "../../src/flow/config.ts";
 import { writeFlow } from "../../src/flow/store.ts";
 import { flowView } from "../../src/views/index.ts";
-import { Extractor } from "../../src/analysis/extract.ts";
+import {
+  DEFAULT_VENDOR_MARKERS,
+  externalLabel,
+  isExternal,
+} from "../../src/analysis/vendor.ts";
 import { FIXTURE } from "../helpers.ts";
 
 function repo(): string {
@@ -80,11 +84,12 @@ test("external locations are portable across checkouts", { timeout: 300_000 }, a
 });
 
 test("the external label is derived, not machine-specific", () => {
+  const M = DEFAULT_VENDOR_MARKERS;
   assert.equal(
-    Extractor.externalLabel("../../../some/where/node_modules/basedpyright/x/builtins.pyi"),
+    externalLabel("../../../some/where/node_modules/basedpyright/x/builtins.pyi", M),
     "<ext>/basedpyright/x/builtins.pyi",
   );
-  assert.equal(Extractor.externalLabel("../../elsewhere/foo.py"), "<ext>/foo.py");
-  assert.ok(Extractor.isExternal("../outside.py"));
-  assert.ok(!Extractor.isExternal("inside/app.py"));
+  assert.equal(externalLabel("../../elsewhere/foo.py", M), "<ext>/foo.py");
+  assert.ok(isExternal("../outside.py", M));
+  assert.ok(!isExternal("inside/app.py", M));
 });
