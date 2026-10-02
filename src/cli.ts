@@ -11,6 +11,7 @@ import {
   conditionLabel,
 } from "./views/index.ts";
 import { Sidecar, serveStdio } from "./sidecar/server.ts";
+import { McpServer, serveMcpStdio } from "./sidecar/mcp.ts";
 import { Extractor } from "./analysis/extract.ts";
 import { BranchIndex } from "./analysis/branches.ts";
 import { DispatchResolver } from "./analysis/dispatch.ts";
@@ -93,6 +94,17 @@ Usage:
 
   enchanted-map serve [--root DIR] [--port N] [--stdio]
       Run the sidecar: HTTP canvas for the browser, stdio RPC for the editor.
+
+  enchanted-map mcp [--root DIR]
+      Run the agent surface: MCP over stdio, for curating unresolved dispatch.
+      Register it with Claude Code, from the repository you want to curate:
+        claude mcp add enchanted-map -- <this-repo>/src/cli.ts mcp --root=<dir>
+
+      Use the --root=DIR form there: a separated '--root .' can lose its '.'
+      on the way through, leaving the flag with no value.
+
+      The short name 'enchanted-map' is only on PATH after 'npm link' is run
+      in this repository; without that, invoke src/cli.ts directly as above.
 
   enchanted-map help
 `;
@@ -467,6 +479,20 @@ async function cmdServe(args: Args): Promise<number> {
   return 0;
 }
 
+/**
+ * The agent surface. Speaks MCP on stdio and nothing else: the client owns
+ * this process, so there is no port to configure and no daemon to leak.
+ */
+async function cmdMcp(args: Args): Promise<number> {
+  const root = rootOf(args);
+  const server = new McpServer(new FlowService(root));
+  serveMcpStdio(server);
+  // stdout belongs to the protocol; anything else on it disconnects the client.
+  process.stderr.write(`enchanted-map mcp on stdio  root: ${root}\n`);
+  await new Promise<void>(() => {}); // run until the client closes stdin
+  return 0;
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   let code = 0;
@@ -503,6 +529,9 @@ async function run(args: Args): Promise<number> {
       break;
     case "serve":
       code = await cmdServe(args);
+      break;
+    case "mcp":
+      code = await cmdMcp(args);
       break;
     case "help":
     case "--help":
