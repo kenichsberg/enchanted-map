@@ -3,6 +3,17 @@ import { loadConfig, type EntryPointDecl, type ProjectConfig } from "./config.ts
 import { readFlow, writeFlow, listFlows, markBroken } from "./store.ts";
 import { computeStaleness, currentRevision, accept, type StalenessReport } from "./staleness.ts";
 import type { Flow } from "./model.ts";
+import {
+  curate,
+  holeOffers,
+  recordDecline,
+  recordResolution,
+  withdrawJudgment,
+  CurationError,
+  type DispatchJudgment,
+  type HoleOffer,
+  type RecordOptions,
+} from "./judgments.ts";
 import { FactCache } from "../cache/store.ts";
 import { resolveMarkers } from "../analysis/vendor.ts";
 import { canonical } from "../util/paths.ts";
@@ -103,6 +114,82 @@ export class FlowService {
     const out: FlowStatus[] = [];
     for (const name of this.names()) out.push(await this.status(name));
     return out;
+  }
+
+  // ------------------------------------------------------------ curation --
+  //
+  // Every method below writes a judgment, and each is reachable only from an
+  // explicit request. Nothing on the analysis or staleness paths calls them:
+  // that is what "curation never runs unasked" means in code.
+
+  /**
+   * The stored flow a judgment applies to.
+   *
+   * Deliberately the stored one rather than a fresh analysis: a judgment is
+   * recorded against the facts the agent was shown, and re-analysing here
+   * would let the hole move between reading it and answering it.
+   */
+  #curatable(name: string): Flow {
+    const flow = readFlow(this.root, name);
+    if (!flow) {
+      throw new CurationError(
+        `flow '${name}' has not been analyzed yet (root: ${this.root}). ` +
+          `Analyze it first; curation never analyzes on your behalf.`,
+      );
+    }
+    return flow;
+  }
+
+  /** Every hole in a flow, open and settled alike. */
+  holes(name: string): HoleOffer[] {
+    return holeOffers(this.#curatable(name));
+  }
+
+  /** Record a dispatch resolution by the candidate's position (design D2). */
+  resolveDispatch(
+    name: string,
+    holeId: string,
+    candidateIndex: number,
+    opts: RecordOptions = {},
+  ): { flow: Flow; judgment: DispatchJudgment; holeId: string } {
+    const { flow, judgment, hole } = recordResolution(
+      this.#curatable(name),
+      holeId,
+      candidateIndex,
+      opts,
+    );
+    writeFlow(this.root, flow);
+    return { flow, judgment, holeId: hole.id };
+  }
+
+  /** Record that a hole was considered and could not be answered (design D3). */
+  declineDispatch(
+    name: string,
+    holeId: string,
+    reason: string,
+    opts: RecordOptions = {},
+  ): { flow: Flow; judgment: DispatchJudgment; holeId: string } {
+    const { flow, judgment, hole } = recordDecline(
+      this.#curatable(name),
+      holeId,
+      reason,
+      opts,
+    );
+    writeFlow(this.root, flow);
+    return { flow, judgment, holeId: hole.id };
+  }
+
+  /** Remove a judgment, returning the hole to its unresolved state. */
+  withdrawJudgment(name: string, holeId: string): { flow: Flow; siteId: string } {
+    const { flow, siteId } = withdrawJudgment(this.#curatable(name), holeId);
+    writeFlow(this.root, flow);
+    return { flow, siteId };
+  }
+
+  /** The stored flow with its current judgments applied. */
+  curated(name: string): Flow | null {
+    const flow = readFlow(this.root, name);
+    return flow ? curate(flow).flow : null;
   }
 
   /** Stamp the stored flow as accepted at the current revision. */

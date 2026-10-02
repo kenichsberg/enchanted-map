@@ -2,8 +2,9 @@ import { execFileSync } from "node:child_process";
 import type { SymbolId } from "../analysis/types.ts";
 import type { AcceptStamp, Flow } from "./model.ts";
 import { reconcile, type IdentityResult } from "./identity.ts";
+import { judgmentState } from "./judgments.ts";
 
-export type EntryKind = "node" | "edge" | "hole";
+export type EntryKind = "node" | "edge" | "hole" | "judgment";
 
 /**
  * One stale stored entry, attributed to the specific node or edge it affects.
@@ -98,18 +99,35 @@ export function computeStaleness(
     }
   }
 
-  // Holes.
+  // Holes, and the judgments resting on them.
+  //
+  // A judgment is reported in its own right rather than left implicit in the
+  // hole entry beside it. "This hole changed" and "the answer somebody gave for
+  // this hole no longer holds" are different pieces of work: the first is
+  // re-derived for free, the second has to be asked again.
   const currentHoles = new Map(current.holes.map((h) => [h.id, h]));
   const storedHoleIds = new Set<string>();
   for (const prev of stored.holes) {
     const now = currentHoles.get(prev.id);
     storedHoleIds.add(prev.id);
+    const judgment = stored.judgments?.dispatch?.[prev.siteId];
     if (!now) {
       entries.push({ kind: "hole", id: prev.id, affects: prev.siteId, reason: "removed" });
+      if (judgment) {
+        entries.push({
+          kind: "judgment",
+          id: prev.siteId,
+          affects: prev.siteId,
+          reason: "removed",
+        });
+      }
       continue;
     }
     if (now.depHash !== prev.depHash) {
       entries.push({ kind: "hole", id: prev.id, affects: prev.siteId, reason: "changed" });
+    }
+    if (judgment && judgmentState(judgment, now) !== "current") {
+      entries.push({ kind: "judgment", id: prev.siteId, affects: prev.siteId, reason: "changed" });
     }
   }
   for (const now of current.holes) {

@@ -2,6 +2,7 @@ import type { CallKind, Condition } from "../analysis/types.ts";
 import type { Flow, FlowEdge, FlowNode } from "../flow/model.ts";
 import type { StalenessReport } from "../flow/staleness.ts";
 import { acceptanceState, type AcceptanceState } from "../flow/staleness.ts";
+import { curate, type AppliedJudgment, type Confidence, type JudgmentOutcome, type JudgmentState } from "../flow/judgments.ts";
 
 /**
  * Views are plain serialisable objects. Nothing here imports an editor, a
@@ -78,6 +79,23 @@ export interface ViewEdge {
    * `notify(SMSSender(), ...)` a sequence rather than two independent calls.
    */
   evaluatedBeforeEnclosing: boolean;
+  /**
+   * The decision behind this target, when one was made. Present only on an
+   * `agent-inferred` edge. A judgement has to stay inspectable: the tier says
+   * it was judged, this says by whom, how sure, and why (design D5).
+   */
+  judgment: ViewJudgment | null;
+}
+
+/** A recorded decision, flattened for a surface to render without lookups. */
+export interface ViewJudgment {
+  outcome: JudgmentOutcome;
+  state: JudgmentState;
+  target: string | null;
+  by: string;
+  at: string;
+  confidence: Confidence | null;
+  note: string | null;
 }
 
 /** A step on the path from a flow's entry point to a focused node. */
@@ -113,8 +131,31 @@ export interface FlowView {
   broken: boolean;
   nodes: ViewNode[];
   edges: ViewEdge[];
-  holes: Array<{ id: string; siteId: string; declaredTarget: string; reason: string; candidates: string[] }>;
-  counts: { nodes: number; edges: number; holes: number; stale: number };
+  holes: Array<{
+    id: string;
+    siteId: string;
+    declaredTarget: string;
+    reason: string;
+    candidates: string[];
+    /**
+     * Set when the hole was considered but not resolved: declined, or judged
+     * on inputs that have since moved. A hole that was thought about is not
+     * the same as one nobody has looked at (design D3).
+     */
+    judgment: ViewJudgment | null;
+  }>;
+  /** Every recorded dispatch decision in this flow, whatever its state. */
+  judgments: Array<ViewJudgment & { holeId: string; siteId: string }>;
+  counts: {
+    nodes: number;
+    edges: number;
+    holes: number;
+    stale: number;
+    /** Resolutions currently standing. Counted separately: these are guesses. */
+    judged: number;
+    /** Decisions whose inputs moved, so the question is open again. */
+    staleJudgments: number;
+  };
 }
 
 function staleIndex(report: StalenessReport | null): Map<string, string[]> {
@@ -143,12 +184,26 @@ function toViewNode(n: FlowNode, flow: Flow, stale: Map<string, string[]>): View
   };
 }
 
+function toViewJudgment(a: AppliedJudgment): ViewJudgment {
+  return {
+    outcome: a.judgment.outcome,
+    state: a.state,
+    target: a.judgment.target,
+    by: a.judgment.by,
+    at: a.judgment.at,
+    confidence: a.judgment.confidence,
+    note: a.judgment.note,
+  };
+}
+
 function toViewEdge(
   e: FlowEdge,
   stale: Map<string, string[]>,
   nestingDepth = 0,
+  judgments: Map<string, AppliedJudgment> = new Map(),
 ): ViewEdge {
   const reasons = stale.get(e.id) ?? [];
+  const judged = judgments.get(e.id);
   return {
     id: e.id,
     from: e.from,
@@ -169,6 +224,7 @@ function toViewEdge(
     enclosingSite: e.enclosingSite ?? null,
     nestingDepth,
     evaluatedBeforeEnclosing: (e.kind ?? "call") === "argument",
+    judgment: judged ? toViewJudgment(judged) : null,
   };
 }
 
@@ -292,10 +348,16 @@ function pathTo(root: string, target: string, edges: FlowEdge[]): string[] {
 
 /** The whole flow: nodes are functions, guards live on edges (design D4). */
 export function flowView(
-  flow: Flow,
+  stored: Flow,
   report: StalenessReport | null = null,
   opts: FlowViewOptions = {},
 ): FlowView {
+  // Judgments are applied here rather than written into the stored flow, so
+  // the facts keep their holes and their declared targets and a withdrawal
+  // restores the hole exactly. Every surface goes through this function, so
+  // none of them can disagree about what has been judged (design D6).
+  const { flow, applied } = curate(stored);
+  const judgmentsBySite = new Map(applied.map((a) => [a.siteId, a]));
   const stale = staleIndex(report);
 
   // Focus selects what is shown. It must not change what any of it means, so
@@ -326,19 +388,34 @@ export function flowView(
     acceptedRevision: flow.accepted?.revision ?? null,
     broken: flow.broken,
     nodes: nodes.map((n) => toViewNode(n, flow, stale)),
-    edges: sequence(edges).map(({ edge, depth }) => toViewEdge(edge, stale, depth)),
-    holes: holes.map((h) => ({
-      id: h.id,
-      siteId: h.siteId,
-      declaredTarget: h.declaredTarget,
-      reason: h.reason,
-      candidates: h.candidates,
+    edges: sequence(edges).map(({ edge, depth }) =>
+      toViewEdge(edge, stale, depth, judgmentsBySite),
+    ),
+    holes: holes.map((h) => {
+      const judged = judgmentsBySite.get(h.siteId);
+      return {
+        id: h.id,
+        siteId: h.siteId,
+        declaredTarget: h.declaredTarget,
+        reason: h.reason,
+        candidates: h.candidates,
+        judgment: judged ? toViewJudgment(judged) : null,
+      };
+    }),
+    judgments: applied.map((a) => ({
+      holeId: a.holeId,
+      siteId: a.siteId,
+      ...toViewJudgment(a),
     })),
     counts: {
       nodes: nodes.length,
       edges: edges.length,
       holes: holes.length,
       stale: report?.entries.length ?? 0,
+      judged: applied.filter(
+        (a) => a.state === "current" && a.judgment.outcome === "resolved",
+      ).length,
+      staleJudgments: applied.filter((a) => a.state !== "current").length,
     },
   };
 }
@@ -444,14 +521,35 @@ export function stalenessView(flow: Flow, report: StalenessReport): StalenessVie
 export interface ProvenanceView {
   kind: "provenance";
   flow: string;
+  /**
+   * Tier -> edge ids. Always carries every tier, including empty ones: a view
+   * that silently omits `agent-inferred` reads as "nothing was guessed here",
+   * which is a different claim from "this tier does not appear".
+   */
   tiers: Record<string, string[]>;
   unresolved: Array<{ edgeId: string; declaredTarget: string; candidates: string[] }>;
+  /** Agent-inferred edges with the evidence their target rests on. */
+  inferred: Array<{
+    edgeId: string;
+    declaredTarget: string;
+    chosen: string;
+    candidates: string[];
+    confidence: Confidence | null;
+    by: string;
+    at: string;
+    note: string | null;
+  }>;
+  /** Decisions that no longer stand, so their edges are unresolved again. */
+  staleJudgments: Array<{ siteId: string; state: JudgmentState; by: string; at: string }>;
 }
 
-export function provenanceView(flow: Flow): ProvenanceView {
+export function provenanceView(stored: Flow): ProvenanceView {
+  const { flow, applied } = curate(stored);
+  const judgmentsBySite = new Map(applied.map((a) => [a.siteId, a]));
   const tiers: Record<string, string[]> = {
     "lsp-verified": [],
     heuristic: [],
+    "agent-inferred": [],
     "declared-unresolved": [],
   };
   for (const e of flow.edges) {
@@ -464,5 +562,23 @@ export function provenanceView(flow: Flow): ProvenanceView {
     unresolved: flow.edges
       .filter((e) => e.provenance === "declared-unresolved")
       .map((e) => ({ edgeId: e.id, declaredTarget: e.to, candidates: e.candidates })),
+    inferred: flow.edges
+      .filter((e) => e.provenance === "agent-inferred")
+      .map((e) => {
+        const a = judgmentsBySite.get(e.id);
+        return {
+          edgeId: e.id,
+          declaredTarget: e.declaredTarget ?? "",
+          chosen: e.to,
+          candidates: e.candidates,
+          confidence: a?.judgment.confidence ?? null,
+          by: a?.judgment.by ?? "unknown",
+          at: a?.judgment.at ?? "",
+          note: a?.judgment.note ?? null,
+        };
+      }),
+    staleJudgments: applied
+      .filter((a) => a.state !== "current")
+      .map((a) => ({ siteId: a.siteId, state: a.state, by: a.judgment.by, at: a.judgment.at })),
   };
 }

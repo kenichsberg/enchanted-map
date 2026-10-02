@@ -3,6 +3,7 @@ import path from "node:path";
 import YAML from "yaml";
 import { flowsDir } from "./config.ts";
 import { emptyJudgments, type Flow } from "./model.ts";
+import { readDispatchJudgment, type DispatchJudgment } from "./judgments.ts";
 
 /** One file per flow, so merge conflicts are scoped to the same flow (design D8). */
 export function flowPath(root: string, name: string): string {
@@ -45,11 +46,19 @@ export function readFlow(root: string, name: string): Flow | null {
   if (!existsSync(file)) return null;
   const raw = YAML.parse(readFileSync(file, "utf8")) as Partial<Flow> | null;
   if (!raw?.name) return null;
-  // Judgment slots must parse even when a human (or a later agent) filled them.
+  // Judgment slots must parse even when a human (or an agent) filled them, and
+  // the dispatch slot must parse in the bare-target form written before
+  // judgments carried provenance. Normalising here means one shape in memory.
+  const storedDispatch = (raw.judgments?.dispatch ?? {}) as Record<string, unknown>;
+  const dispatch: Record<string, DispatchJudgment> = {};
+  for (const [siteId, value] of Object.entries(storedDispatch)) {
+    const j = readDispatchJudgment(value);
+    if (j) dispatch[siteId] = j;
+  }
   const judgments = {
     labels: raw.judgments?.labels ?? {},
     clusters: raw.judgments?.clusters ?? [],
-    dispatch: raw.judgments?.dispatch ?? {},
+    dispatch,
   };
   return {
     name: raw.name,

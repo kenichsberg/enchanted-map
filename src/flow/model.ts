@@ -8,6 +8,7 @@ import type {
   SymbolId,
   SymbolRef,
 } from "../analysis/types.ts";
+import type { DispatchJudgment } from "./judgments.ts";
 
 /** A node as persisted in a flow file. */
 export interface FlowNode {
@@ -59,16 +60,24 @@ export interface FlowHole {
 }
 
 /**
- * Reserved slots for probabilistic judgments. Nothing in this system populates
- * them by inference; a human may, and a later agent layer will.
+ * Probabilistic judgments, stored beside the derived facts and never produced
+ * by them. Nothing in this system populates these by inference: an agent or a
+ * human fills them in response to an explicit request, and analysis carries
+ * them forward untouched.
  */
 export interface FlowJudgments {
-  /** symbolId -> human-readable label. */
+  /** symbolId -> human-readable label. Still reserved; nothing writes it yet. */
   labels: Record<string, string>;
-  /** Named groups of nodes that are "one thing". */
+  /** Named groups of nodes that are "one thing". Still reserved. */
   clusters: Array<{ name: string; members: SymbolId[] }>;
-  /** callSiteId -> chosen concrete target. */
-  dispatch: Record<string, string>;
+  /**
+   * callSiteId -> what was decided about that dispatch, and on what evidence.
+   *
+   * Widened from a bare target id. The old form still reads, as a decision of
+   * unknown provenance and no hash -- which makes it stale on first check
+   * rather than silently trusted (design D7).
+   */
+  dispatch: Record<string, DispatchJudgment>;
 }
 
 export interface AcceptStamp {

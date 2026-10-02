@@ -98,10 +98,21 @@ export interface CallSite {
 }
 
 /**
- * Provenance tiers for this change. An agent tier is deliberately absent;
- * nothing in this system infers edges.
+ * How much an edge's target is to be believed.
+ *
+ * `agent-inferred` is its own tier rather than a shade of `heuristic`, and is
+ * never presented as `lsp-verified`. The map is useful because you can see how
+ * much of it is known and how much is guessed; a judgement that renders
+ * identically to a fact spends trust this layer has not earned (design D5).
+ *
+ * Nothing in the analysis layer produces `agent-inferred`. It is applied over
+ * these facts, where -- and only where -- the deterministic layer left a hole.
  */
-export type Provenance = "lsp-verified" | "heuristic" | "declared-unresolved";
+export type Provenance =
+  | "lsp-verified"
+  | "heuristic"
+  | "agent-inferred"
+  | "declared-unresolved";
 
 /**
  * One edge per call site. Two calls from the same caller to the same callee
