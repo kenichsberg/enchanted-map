@@ -111,6 +111,16 @@ function M.declare_entry_point(name)
   end)
 end
 
+--- JSON `null` decodes to `vim.NIL`, a userdata value that is TRUTHY in Lua.
+--- Every optional field crossing the RPC boundary has to come through here, or
+--- `if x then x.y end` indexes a userdata and takes the whole render down.
+local function present(v)
+  if v == nil or v == vim.NIL then
+    return nil
+  end
+  return v
+end
+
 local function render_flow(view)
   local lines = {}
   local targets = {}
@@ -134,12 +144,34 @@ local function render_flow(view)
       view.counts.stale
     )
   )
+  -- Guesses are counted apart from facts. A reader who cannot see how much of
+  -- the map was inferred cannot calibrate how much of it to trust.
+  if (view.counts.judged or 0) > 0 or (view.counts.staleJudgments or 0) > 0 then
+    push(
+      ("  %d agent-inferred · %d judgments needing a fresh answer"):format(
+        view.counts.judged or 0,
+        view.counts.staleJudgments or 0
+      )
+    )
+  end
   push("")
 
   for _, e in ipairs(view.edges or {}) do
     local marks = {}
     if e.provenance ~= "lsp-verified" then
       table.insert(marks, e.provenance)
+    end
+    -- Say who guessed and how sure, right beside the tier.
+    local judged = present(e.judgment)
+    if judged then
+      local confidence = present(judged.confidence)
+      table.insert(
+        marks,
+        ("by %s%s"):format(
+          present(judged.by) or "unknown",
+          confidence and ("/" .. confidence) or ""
+        )
+      )
     end
     if e.closesCycle then
       table.insert(marks, "cycle")
@@ -172,7 +204,20 @@ local function render_flow(view)
     push("")
     push(("unresolved dispatch (%d):"):format(#view.holes))
     for _, h in ipairs(view.holes) do
-      push(("  %s  %s  %d candidates"):format(h.declaredTarget, h.reason, #h.candidates))
+      local line = ("  %s  %s  %d candidates"):format(h.declaredTarget, h.reason, #h.candidates)
+      -- An open hole that was considered is not an open hole that was skipped.
+      local judged = present(h.judgment)
+      if judged then
+        local note = present(judged.note)
+        line = line
+          .. ("  (%s/%s by %s%s)"):format(
+            judged.outcome,
+            judged.state,
+            present(judged.by) or "unknown",
+            note and (": " .. note) or ""
+          )
+      end
+      push(line)
     end
   end
 

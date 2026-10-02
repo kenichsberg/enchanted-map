@@ -344,6 +344,11 @@ function renderView(view: unknown): string {
       const cond = e.conditionLabel ? `  [${e.conditionLabel}]` : "";
       const marks = [
         e.provenance !== "lsp-verified" ? e.provenance : null,
+        // A judgement must never read like a fact, so say who guessed and how
+        // sure they were right next to the tier (design D5).
+        e.judgment
+          ? `by ${e.judgment.by}${e.judgment.confidence ? `/${e.judgment.confidence}` : ""}`
+          : null,
         e.closesCycle ? "cycle" : null,
         e.stale ? `stale:${e.staleReasons.join("/")}` : null,
       ].filter(Boolean);
@@ -360,7 +365,19 @@ function renderView(view: unknown): string {
     const cycles = f.nodes.filter((n) => n.cycle).map((n) => n.label);
     if (cycles.length) out.push(`  cycles: ${cycles.join(", ")}`);
     for (const h of f.holes) {
-      out.push(`  hole @${h.siteId}  reason=${h.reason}  candidates=${h.candidates.length}`);
+      // A declined or stale hole is still open, but it is not untouched.
+      const j = h.judgment
+        ? `  (${h.judgment.outcome}/${h.judgment.state} by ${h.judgment.by}` +
+          `${h.judgment.note ? `: ${h.judgment.note}` : ""})`
+        : "";
+      out.push(
+        `  hole ${h.id}  reason=${h.reason}  candidates=${h.candidates.length}${j}`,
+      );
+    }
+    if (f.counts.judged > 0 || f.counts.staleJudgments > 0) {
+      out.push(
+        `\n  judgments: ${f.counts.judged} standing, ${f.counts.staleJudgments} needing a fresh answer`,
+      );
     }
   } else if (v["kind"] === "diff") {
     const d = view as ReturnType<typeof diffView>;
@@ -384,6 +401,17 @@ function renderView(view: unknown): string {
     }
     for (const u of p2.unresolved) {
       out.push(`  unresolved ${u.edgeId} -> ${u.declaredTarget}  (${u.candidates.length} candidates)`);
+    }
+    for (const i of p2.inferred) {
+      out.push(
+        `  agent-inferred ${i.edgeId}: ${i.declaredTarget} -> ${i.chosen}` +
+          `  (${i.confidence ?? "no confidence given"}, by ${i.by}, ` +
+          `chosen from ${i.candidates.length})` +
+          (i.note ? `\n      ${i.note}` : ""),
+      );
+    }
+    for (const sj of p2.staleJudgments) {
+      out.push(`  ${sj.state} judgment @${sj.siteId} by ${sj.by} -- the edge is unresolved again`);
     }
   }
   return out.join("\n");

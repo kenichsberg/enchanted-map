@@ -231,6 +231,74 @@ check(
 )
 em.config.root = saved2
 
+-- 5b. A judgment recorded elsewhere is legible in the listing as a judgment.
+vim.cmd.edit(root .. "/app.py")
+local blnum = vim.fn.search("^def broadcast", "w")
+check("found the broadcast definition", blnum > 0, "line " .. tostring(blnum))
+vim.api.nvim_win_set_cursor(0, { blnum, 4 })
+em.declare_entry_point("broadcast")
+vim.wait(20000, function()
+  local _, res = rpc("flows", {}, 20000)
+  return res and res.flows and vim.tbl_contains(res.flows, "broadcast")
+end, 200)
+local berr = rpc("analyze", { flow = "broadcast" })
+check("analyze broadcast succeeded", berr == nil, berr)
+
+local herr, hres = rpc("holes", { flow = "broadcast" })
+check(
+  "broadcast offers an unresolved dispatch",
+  herr == nil and hres and hres.holes and #hres.holes > 0,
+  herr or vim.inspect(hres)
+)
+
+if hres and hres.holes and hres.holes[1] then
+  local rerr = rpc("resolve_dispatch", {
+    flow = "broadcast",
+    hole = hres.holes[1].id,
+    candidate = 0,
+    confidence = "guess",
+    by = "nvim-test",
+  })
+  check("the editor can record a dispatch judgment", rerr == nil, rerr)
+
+  em.open_flow("broadcast")
+  vim.wait(60000, function()
+    return vim.bo.filetype == "enchanted-map"
+  end, 100)
+  local jtext = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+  check(
+    "listing marks the judged edge as agent-inferred",
+    jtext:match("agent%-inferred") ~= nil,
+    jtext:sub(1, 400)
+  )
+  check(
+    "listing says who judged it and how sure",
+    jtext:match("by nvim%-test/guess") ~= nil,
+    "no author or confidence beside the tier"
+  )
+  check(
+    "listing counts guesses apart from facts",
+    jtext:match("1 agent%-inferred") ~= nil,
+    jtext:sub(1, 400)
+  )
+
+  local werr = rpc("withdraw_judgment", { flow = "broadcast", hole = hres.holes[1].id })
+  check("the judgment can be withdrawn", werr == nil, werr)
+  em.open_flow("broadcast")
+  -- The buffer is already of this filetype from the open above, so waiting on
+  -- the filetype would read the previous render and pass or fail by accident.
+  -- Wait for the content itself to lose the tier.
+  vim.wait(60000, function()
+    return not table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n"):match("agent%-inferred")
+  end, 200)
+  local wtext = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+  check(
+    "withdrawing restores the unresolved dispatch",
+    wtext:match("agent%-inferred") == nil and wtext:match("unresolved dispatch") ~= nil,
+    wtext:sub(1, 400)
+  )
+end
+
 -- 6. Accept the flow.
 local accerr, accview = rpc("accept", { flow = "login" })
 check("accept stamps the flow", accerr == nil and accview and accview.acceptance == "accepted", accerr)

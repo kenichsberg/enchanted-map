@@ -8,14 +8,14 @@
   :root {
     --bg: #fbfaf7; --fg: #1d1c19; --muted: #6d6a62; --line: #d9d5cb;
     --panel: #ffffff; --accent: #3b5bdb; --stale: #c2410c; --hole: #a16207;
-    --verified: #1d1c19; --heuristic: #3b5bdb; --unresolved: #a16207;
+    --verified: #1d1c19; --heuristic: #3b5bdb; --unresolved: #a16207; --agent: #7c3aed;
   }
   :root:not([data-theme="light"]) { }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: #16151a; --fg: #eceaf0; --muted: #9a97a3; --line: #34323c;
       --panel: #1f1e25; --accent: #8da2fb; --stale: #fb923c; --hole: #fbbf24;
-      --verified: #eceaf0; --heuristic: #8da2fb; --unresolved: #fbbf24;
+      --verified: #eceaf0; --heuristic: #8da2fb; --unresolved: #fbbf24; --agent: #c4b5fd; --agent: #c4b5fd;
     }
   }
   :root[data-theme="dark"] {
@@ -83,6 +83,9 @@
   .edge.lsp-verified { stroke: var(--verified); }
   .edge.heuristic { stroke: var(--heuristic); stroke-dasharray: 7 4; }
   .edge.declared-unresolved { stroke: var(--unresolved); stroke-dasharray: 2 4; }
+  /* Dash-dot, not merely another colour: a judgement has to be legible as a
+     judgement without relying on hue. */
+  .edge.agent-inferred { stroke: var(--agent); stroke-dasharray: 9 3 2 3; }
   .edge.stale { stroke: var(--stale); }
   .edge.arg { stroke-width: 1.1; opacity: 0.85; }
   .feeds { fill: none; stroke: var(--muted); stroke-width: 1.1; stroke-dasharray: 3 3; }
@@ -139,6 +142,7 @@
   <span><i class="swatch" style="border-top:2px solid var(--verified)"></i> verified</span>
   <span><i class="swatch" style="border-top:2px dashed var(--heuristic)"></i> heuristic</span>
   <span><i class="swatch" style="border-top:2px dotted var(--unresolved)"></i> unresolved dispatch</span>
+  <span><i class="swatch" style="border-top:2px dashed var(--agent)"></i> agent-inferred</span>
   <span><i class="swatch" style="border-top:2px dashed var(--stale)"></i> stale</span>
   <span><i class="swatch" style="border-top:1px dashed var(--muted)"></i> argument, evaluated first</span>
   <span>click a node to jump · pin or double-click to focus · ctrl+scroll to zoom</span>

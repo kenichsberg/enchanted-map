@@ -142,8 +142,15 @@ export function renderFlow(view) {
       : `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;
     const cls = `edge ${e.provenance}${e.stale ? " stale" : ""}${e.kind === "argument" ? " arg" : ""}`;
     const colorVar = e.stale ? "--stale" : e.provenance === "heuristic" ? "--heuristic"
-      : e.provenance === "declared-unresolved" ? "--unresolved" : "--verified";
-    parts.push(`<path class="${cls}" d="${d}" marker-end="url(#a)" style="color:var(${colorVar})"><title>${esc(e.id)}</title></path>`);
+      : e.provenance === "declared-unresolved" ? "--unresolved"
+      : e.provenance === "agent-inferred" ? "--agent" : "--verified";
+    // A guess must say so where it is read, not only in a legend.
+    const judged = e.judgment
+      ? `\nagent-inferred: chosen by ${e.judgment.by}` +
+        `${e.judgment.confidence ? ` (${e.judgment.confidence})` : ""}` +
+        `${e.judgment.note ? `\n${e.judgment.note}` : ""}`
+      : "";
+    parts.push(`<path class="${cls}" d="${d}" marker-end="url(#a)" style="color:var(${colorVar})"><title>${esc(e.id)}${esc(judged)}</title></path>`);
     // Source order, and the value flowing into the call it feeds.
     parts.push(`<text class="seq" x="${x1 + 6}" y="${y1 + 13}">${e.ordinal ?? 0}</text>`);
     if (e.kind === "argument" && e.enclosingSite) {
@@ -228,7 +235,27 @@ export function renderFlow(view) {
   if (view.holes.length) {
     parts.push(`<h2 style="font-size:14px;margin:20px 0 6px">Unresolved dispatch (${view.holes.length})</h2><ul class="list">`);
     for (const h of view.holes) {
-      parts.push(`<li><code>${esc(h.declaredTarget)}</code> — ${esc(h.reason)}, ${h.candidates.length} candidates<ul class="list">${h.candidates.map((c) => `<li><code>${esc(c)}</code></li>`).join("")}</ul></li>`);
+      // A hole someone looked at and could not answer is still open, but it is
+      // not untouched, and reading it as untouched wastes the next reader.
+      const j = h.judgment
+        ? `<br><small>${esc(h.judgment.outcome)} (${esc(h.judgment.state)}) by ${esc(h.judgment.by)}` +
+          `${h.judgment.note ? ` — ${esc(h.judgment.note)}` : ""}</small>`
+        : "";
+      parts.push(`<li><code>${esc(h.declaredTarget)}</code> — ${esc(h.reason)}, ${h.candidates.length} candidates${j}<ul class="list">${h.candidates.map((c) => `<li><code>${esc(c)}</code></li>`).join("")}</ul></li>`);
+    }
+    parts.push(`</ul>`);
+  }
+
+  const inferred = view.edges.filter((e) => e.provenance === "agent-inferred");
+  if (inferred.length) {
+    parts.push(`<h2 style="font-size:14px;margin:20px 0 6px">Agent-inferred (${inferred.length})</h2><ul class="list">`);
+    for (const e of inferred) {
+      const j = e.judgment ?? {};
+      parts.push(
+        `<li><code>${esc(e.declaredTarget ?? "")}</code> → <code>${esc(e.to)}</code>` +
+        `<br><small>${esc(j.confidence ?? "no confidence given")}, by ${esc(j.by ?? "unknown")}, ` +
+        `chosen from ${e.candidates.length} candidates${j.note ? ` — ${esc(j.note)}` : ""}</small></li>`
+      );
     }
     parts.push(`</ul>`);
   }
@@ -257,7 +284,18 @@ export function renderStale(v) {
 export function renderProvenance(v) {
   const tiers = Object.entries(v.tiers).map(([t, ids]) => `<li><code>${esc(t)}</code>: ${ids.length}</li>`).join("");
   const un = v.unresolved.map((u) => `<li><code>${esc(u.edgeId)}</code> → <code>${esc(u.declaredTarget)}</code> (${u.candidates.length} candidates)</li>`).join("");
+  const inf = (v.inferred ?? []).map((i) =>
+    `<li><code>${esc(i.declaredTarget)}</code> → <code>${esc(i.chosen)}</code>` +
+    `<br><small>${esc(i.confidence ?? "no confidence given")}, by ${esc(i.by)}, ` +
+    `chosen from ${i.candidates.length} candidates${i.note ? ` — ${esc(i.note)}` : ""}</small></li>`
+  ).join("");
+  const sj = (v.staleJudgments ?? []).map((s) =>
+    `<li><code>${esc(s.siteId)}</code> — ${esc(s.state)}, by ${esc(s.by)}; the edge is unresolved again</li>`
+  ).join("");
+  const sec = (title, body) => body ? `<h2 style="font-size:14px;margin:18px 0 4px">${title}</h2><ul class="list">${body}</ul>` : "";
   return `<h2 style="font-size:14px;margin:0 0 6px">Provenance</h2><ul class="list">${tiers}</ul>` +
-    (un ? `<h2 style="font-size:14px;margin:18px 0 4px">Unresolved (${v.unresolved.length})</h2><ul class="list">${un}</ul>` : "");
+    sec(`Unresolved (${v.unresolved.length})`, un) +
+    sec(`Agent-inferred (${(v.inferred ?? []).length})`, inf) +
+    sec(`Judgments needing a fresh answer (${(v.staleJudgments ?? []).length})`, sj);
 }
 
