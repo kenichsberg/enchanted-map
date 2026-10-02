@@ -22,6 +22,9 @@ interface Args {
   flags: Record<string, string | boolean>;
 }
 
+/** A flag was given without the value it needs. Reported, never guessed at. */
+class UsageError extends Error {}
+
 function parseArgs(argv: string[]): Args {
   const [cmd = "help", ...rest] = argv;
   const positional: string[] = [];
@@ -29,6 +32,14 @@ function parseArgs(argv: string[]): Args {
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i] ?? "";
     if (a.startsWith("--")) {
+      // `--key=value` as well as `--key value`. The separated form is fragile
+      // through other tools: registering this server with `--root .` arrived
+      // with the `.` dropped, leaving a bare `--root`.
+      const eq = a.indexOf("=");
+      if (eq > 2) {
+        flags[a.slice(2, eq)] = a.slice(eq + 1);
+        continue;
+      }
       const key = a.slice(2);
       const next = rest[i + 1];
       if (next !== undefined && !next.startsWith("--")) {
@@ -42,6 +53,21 @@ function parseArgs(argv: string[]): Args {
     }
   }
   return { cmd, positional, flags };
+}
+
+/**
+ * The value of a flag that must have one.
+ *
+ * `--root` with nothing after it used to become the boolean `true`, which
+ * `String()` turned into the word "true" and `path.resolve` turned into a
+ * directory named `true` next to the current one. Every command then reported
+ * an empty project, truthfully, about a place nobody meant.
+ */
+function flagValue(args: Args, key: string): string | undefined {
+  const v = args.flags[key];
+  if (v === undefined) return undefined;
+  if (v === true) throw new UsageError(`--${key} requires a value`);
+  return String(v);
 }
 
 const USAGE = `enchanted-map
@@ -147,8 +173,8 @@ async function cmdFacts(args: Args): Promise<number> {
     process.stderr.write("error: facts requires <file> and <symbol>\n\n" + USAGE);
     return 2;
   }
-  const root = path.resolve(String(args.flags["root"] ?? process.cwd()));
-  const depth = Number(args.flags["depth"] ?? 3);
+  const root = rootOf(args);
+  const depth = Number(flagValue(args, "depth") ?? 3);
 
   const server = new LanguageServer(root);
   await server.start();
@@ -211,7 +237,7 @@ async function locate(
 }
 
 function rootOf(args: Args): string {
-  return path.resolve(String(args.flags["root"] ?? process.cwd()));
+  return path.resolve(flagValue(args, "root") ?? process.cwd());
 }
 
 async function cmdDeclare(args: Args): Promise<number> {
@@ -250,7 +276,7 @@ async function cmdView(args: Args): Promise<number> {
   }
   const root = rootOf(args);
   const svc = new FlowService(root);
-  const lens = String(args.flags["lens"] ?? "flow");
+  const lens = flagValue(args, "lens") ?? "flow";
   const status = await svc.status(name);
   const usableStored = status.stored && !status.stored.legacy ? status.stored : null;
   const stored = usableStored ?? status.current ?? status.stored;
@@ -418,7 +444,7 @@ async function cmdServe(args: Args): Promise<number> {
   let port: number | null = null;
   let bindError: string | null = null;
   try {
-    port = await sidecar.listen(Number(args.flags["port"] ?? 0));
+    port = await sidecar.listen(Number(flagValue(args, "port") ?? 0));
   } catch (e) {
     bindError = (e as Error).message;
   }
@@ -443,6 +469,18 @@ async function cmdServe(args: Args): Promise<number> {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
+  let code = 0;
+  try {
+    code = await run(args);
+  } catch (e) {
+    if (!(e instanceof UsageError)) throw e;
+    process.stderr.write(`error: ${e.message}\n\n${USAGE}`);
+    code = 2;
+  }
+  process.exitCode = code;
+}
+
+async function run(args: Args): Promise<number> {
   let code = 0;
   switch (args.cmd) {
     case "facts":
@@ -475,7 +513,7 @@ async function main(): Promise<void> {
       process.stderr.write(`unknown command: ${args.cmd}\n\n${USAGE}`);
       code = 2;
   }
-  process.exitCode = code;
+  return code;
 }
 
 await main();
